@@ -1,4 +1,4 @@
-name: Build Windows Installer
+name: Build All Platforms
 
 on:
   workflow_dispatch:
@@ -11,28 +11,113 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install pyinstaller
           pip install -r requirements.txt
-      
       - name: Build executable
         run: pyinstaller ghv-monitor.spec --clean
-      
       - name: Install Inno Setup
         run: choco install innosetup
-      
       - name: Build installer
         run: iscc setup.iss
-      
-      - name: Upload installer
+      - name: Upload Windows installer
         uses: actions/upload-artifact@v4
         with:
-          name: GHV-Monitor-Windows-Installer
+          name: GHV-Monitor-Windows
           path: installer/*.exe
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          pip install -r requirements.txt
+      - name: Build app bundle
+        run: pyinstaller ghv-monitor.spec --clean --windowed
+      - name: Ad-hoc sign app
+        run: codesign --force --deep --sign - "dist/GHV Monitor.app"
+      - name: Install create-dmg
+        run: brew install create-dmg
+      - name: Create DMG
+        run: |
+          create-dmg \
+            --volname "GHV Monitor" \
+            --window-size 800 400 \
+            --icon-size 100 \
+            --app-drop-link 600 185 \
+            --icon "GHV Monitor.app" 200 185 \
+            --hide-extension "GHV Monitor.app" \
+            "GHV-Monitor.dmg" \
+            "dist/GHV Monitor.app/"
+      - name: Upload macOS DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: GHV-Monitor-macOS
+          path: GHV-Monitor.dmg
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ruby ruby-dev build-essential python3-tk
+          sudo gem install fpm
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          pip install -r requirements.txt
+      - name: Build binary
+        run: pyinstaller ghv-monitor.spec --clean
+      - name: Build .deb package
+        run: |
+          mkdir -p package/usr/bin
+          mkdir -p package/usr/share/applications
+          mkdir -p package/DEBIAN
+          cp dist/GHV-Monitor package/usr/bin/ghv-monitor
+          chmod +x package/usr/bin/ghv-monitor
+          cat > package/usr/share/applications/ghv-monitor.desktop << 'EOF'
+          [Desktop Entry]
+          Name=GHV Monitor
+          Comment=Desktop Screenshot Monitor for GoHireVirtual
+          Exec=/usr/bin/ghv-monitor
+          Icon=computer
+          Terminal=false
+          Type=Application
+          Categories=Utility;Office;
+          StartupNotify=true
+          EOF
+          cat > package/DEBIAN/control << 'EOF'
+          Package: ghv-monitor
+          Version: 1.0.0
+          Section: utils
+          Priority: optional
+          Architecture: amd64
+          Depends: python3-tk, libx11-6, libxtst6, gir1.2-appindicator3-0.1
+          Maintainer: GoHireVirtual <support@gohirevirtual.net>
+          Description: GHV Monitor
+           Desktop screenshot monitoring tool for GoHireVirtual employees.
+           Automatically captures and uploads screenshots based on clock-in status.
+          EOF
+          fpm -s dir -t deb -n ghv-monitor -v 1.0.0 -C package .
+      - name: Upload Linux .deb
+        uses: actions/upload-artifact@v4
+        with:
+          name: GHV-Monitor-Linux
+          path: ghv-monitor_1.0.0_amd64.deb
