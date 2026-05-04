@@ -31,7 +31,7 @@ jobs:
           name: GHV-Monitor-Windows
           path: installer/*.exe
 
-  build-macos:
+    build-macos:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -44,7 +44,7 @@ jobs:
           pip install pyinstaller
           pip install -r requirements.txt
       - name: Build app bundle
-        run: pyinstaller ghv-monitor.spec --clean --windowed
+        run: pyinstaller ghv-monitor.spec --clean
       - name: Debug - check dist folder
         run: ls -la dist/
       - name: Ad-hoc sign app
@@ -68,8 +68,8 @@ jobs:
               --app-drop-link 600 185 \
               "GHV-Monitor.dmg" \
               "dist/GHV Monitor.app/" || \
-            echo "create-dmg failed, falling back to hdiutil..." && \
-            hdiutil create -srcfolder "dist/GHV Monitor.app" -volname "GHV Monitor" -fs HFS+ -format UDZO "GHV-Monitor.dmg"
+            (echo "create-dmg failed, falling back to hdiutil..." && \
+             hdiutil create -srcfolder "dist/GHV Monitor.app" -volname "GHV Monitor" -fs HFS+ -format UDZO "GHV-Monitor.dmg")
           fi
       - name: Upload macOS DMG
         uses: actions/upload-artifact@v4
