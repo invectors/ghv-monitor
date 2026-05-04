@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=GHV Monitor
+Comment=Desktop Screenshot Monitor for GoHireVirtual
+Exec=/usr/bin/ghv-monitor
+Icon=ghv-monitor
+Terminal=false
+Type=Application
+Categories=Utility;Office;
+StartupNotify=true

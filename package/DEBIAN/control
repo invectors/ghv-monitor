@@ -1,0 +1,10 @@
+Package: ghv-monitor
+Version: 1.0.0
+Section: utils
+Priority: optional
+Architecture: amd64
+Depends: python3-tk, libx11-6, libxtst6, gir1.2-appindicator3-0.1
+Maintainer: GoHireVirtual <support@gohirevirtual.net>
+Description: GHV Monitor
+ Desktop screenshot monitoring tool for GoHireVirtual employees.
+ Automatically captures and uploads screenshots based on clock-in status.
