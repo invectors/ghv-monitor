@@ -31,7 +31,7 @@ jobs:
           name: GHV-Monitor-Windows
           path: installer/*.exe
 
-    build-macos:
+  build-macos:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
