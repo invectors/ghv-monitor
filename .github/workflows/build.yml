@@ -45,21 +45,32 @@ jobs:
           pip install -r requirements.txt
       - name: Build app bundle
         run: pyinstaller ghv-monitor.spec --clean --windowed
+      - name: Debug - check dist folder
+        run: ls -la dist/
       - name: Ad-hoc sign app
-        run: codesign --force --deep --sign - "dist/GHV Monitor.app"
+        run: |
+          if [ -d "dist/GHV Monitor.app" ]; then
+            codesign --force --deep --sign - "dist/GHV Monitor.app"
+          else
+            echo "ERROR: App bundle not found!"
+            ls -R dist/
+            exit 1
+          fi
       - name: Install create-dmg
         run: brew install create-dmg
       - name: Create DMG
         run: |
-          create-dmg \
-            --volname "GHV Monitor" \
-            --window-size 800 400 \
-            --icon-size 100 \
-            --app-drop-link 600 185 \
-            --icon "GHV Monitor.app" 200 185 \
-            --hide-extension "GHV Monitor.app" \
-            "GHV-Monitor.dmg" \
-            "dist/GHV Monitor.app/"
+          if [ -d "dist/GHV Monitor.app" ]; then
+            create-dmg \
+              --volname "GHV Monitor" \
+              --window-size 800 400 \
+              --icon-size 100 \
+              --app-drop-link 600 185 \
+              "GHV-Monitor.dmg" \
+              "dist/GHV Monitor.app/" || \
+            echo "create-dmg failed, falling back to hdiutil..." && \
+            hdiutil create -srcfolder "dist/GHV Monitor.app" -volname "GHV Monitor" -fs HFS+ -format UDZO "GHV-Monitor.dmg"
+          fi
       - name: Upload macOS DMG
         uses: actions/upload-artifact@v4
         with:
