@@ -13,7 +13,7 @@ class MonitorGUI:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("GHV Monitor")
-        self.root.geometry("400x450")  # Reduced height since no pause button
+        self.root.geometry("400x450")
         self.root.resizable(False, False)
         
         # Set callbacks
@@ -68,12 +68,20 @@ class MonitorGUI:
         tk.Label(form_frame, text="Username", font=("Arial", 10)).pack(anchor=tk.W)
         self.username_entry = tk.Entry(form_frame, font=("Arial", 12))
         self.username_entry.pack(fill=tk.X, pady=(5, 15))
+        
+        # Pre-fill saved username if exists
+        if monitor.credentials and monitor.credentials.get('username'):
+            self.username_entry.insert(0, monitor.credentials['username'])
         self.username_entry.focus()
         
         # Password
         tk.Label(form_frame, text="Password", font=("Arial", 10)).pack(anchor=tk.W)
         self.password_entry = tk.Entry(form_frame, font=("Arial", 12), show="*")
         self.password_entry.pack(fill=tk.X, pady=(5, 20))
+        
+        # Pre-fill saved password if exists
+        if monitor.credentials and monitor.credentials.get('password'):
+            self.password_entry.insert(0, monitor.credentials['password'])
         
         # Bind Enter key
         self.password_entry.bind('<Return>', lambda e: self.do_login())
@@ -177,8 +185,6 @@ class MonitorGUI:
         self.queue_label = tk.Label(stat2, text="0", font=("Arial", 14, "bold"),
                                     bg='white')
         self.queue_label.pack(anchor=tk.W)
-        
-        # NO PAUSE BUTTON - REMOVED!
         
         # Info
         info_frame = tk.Frame(self.root, bg='#f9fafb', padx=20, pady=15)
