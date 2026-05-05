@@ -1,5 +1,8 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+import sys
+import os
+
 block_cipher = None
 
 a = Analysis(
@@ -14,6 +17,12 @@ a = Analysis(
         'pystray._win32',
         'pystray._xorg',
         'schedule',
+        'rumps',
+        'Foundation',
+        'AppKit',
+        'ApplicationServices',
+        'CoreFoundation',
+        'PyObjCTools',
     ],
     hookspath=[],
     hooksconfig={},
@@ -43,7 +52,7 @@ exe = EXE(
     runtime_tmpdir=None,
     console=False,
     disable_windowed_traceback=False,
-    argv_emulation=False,
+    argv_emulation=True,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
