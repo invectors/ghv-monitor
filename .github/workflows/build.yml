@@ -99,6 +99,8 @@ jobs:
         run: pyinstaller ghv-monitor.spec --clean
       - name: Build .deb package
         run: |
+          rm -f ghv-monitor_1.0.0_amd64.deb
+          rm -rf package
           mkdir -p package/usr/bin
           mkdir -p package/usr/share/applications
           mkdir -p package/DEBIAN
@@ -127,7 +129,7 @@ jobs:
            Desktop screenshot monitoring tool for GoHireVirtual employees.
            Automatically captures and uploads screenshots based on clock-in status.
           EOF
-          fpm -s dir -t deb -n ghv-monitor -v 1.0.0 -C package .
+          fpm --force -s dir -t deb -n ghv-monitor -v 1.0.0 -C package .
       - name: Upload Linux .deb
         uses: actions/upload-artifact@v4
         with:
