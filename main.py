@@ -23,7 +23,7 @@ CONFIG = {
     'UPLOAD_URL': 'https://hub.gohirevirtual.net/api/screenshots/upload.php',
     'STATUS_URL': 'https://hub.gohirevirtual.net/api/screenshots/status.php',
     'CAPTURE_INTERVAL_MINUTES': 10,
-    'STATUS_CHECK_SECONDS': 30,  # Check status every 30 seconds instead of 5 minutes
+    'STATUS_CHECK_SECONDS': 30,
     'MAX_RETRY_ATTEMPTS': 3,
     'IMAGE_QUALITY': 85,
     'MAX_IMAGE_WIDTH': 1920,
@@ -96,24 +96,16 @@ class ScreenshotMonitor:
         try:
             print("[Screenshot] Capturing desktop...")
             
-            # Capture all monitors
             with mss.mss() as sct:
-                # Get all monitors
-                monitor = sct.monitors[0]  # 0 = all monitors combined
-                
-                # Capture screenshot
+                monitor = sct.monitors[0]
                 screenshot = sct.grab(monitor)
-                
-                # Convert to PIL Image
                 img = Image.frombytes('RGB', screenshot.size, screenshot.rgb)
                 
-                # Resize if too large
                 if img.width > CONFIG['MAX_IMAGE_WIDTH']:
                     ratio = CONFIG['MAX_IMAGE_WIDTH'] / img.width
                     new_height = int(img.height * ratio)
                     img = img.resize((CONFIG['MAX_IMAGE_WIDTH'], new_height), Image.Resampling.LANCZOS)
                 
-                # Convert to JPEG bytes
                 buffer = BytesIO()
                 img.save(buffer, format='JPEG', quality=CONFIG['IMAGE_QUALITY'])
                 img_bytes = buffer.getvalue()
@@ -131,14 +123,12 @@ class ScreenshotMonitor:
             if not self.credentials:
                 raise Exception("Not logged in")
             
-            # Convert to base64
             base64_image = base64.b64encode(image_bytes).decode('utf-8')
             
             print("[Upload] Uploading screenshot...")
             print(f"[Upload] URL: {CONFIG['UPLOAD_URL']}")
             print(f"[Upload] Image size: {len(image_bytes)} bytes")
             
-            # Upload
             response = requests.post(
                 CONFIG['UPLOAD_URL'],
                 json={
@@ -205,7 +195,6 @@ class ScreenshotMonitor:
             print(f"[Sync] Status: active={status.get('active')}, clocked_in={status.get('clocked_in')}, on_lunch={status.get('on_lunch')}")
             
             if status.get('active') and status.get('clocked_in') and not status.get('on_lunch'):
-                # Should be monitoring
                 if not self.is_monitoring:
                     print("[Sync] Starting monitoring (clocked in)")
                     self.start_monitoring()
@@ -213,12 +202,10 @@ class ScreenshotMonitor:
                     print("[Sync] Resuming monitoring (back from lunch)")
                     self.resume_monitoring()
             elif status.get('active') and status.get('on_lunch'):
-                # Should be paused
                 if self.is_monitoring and not self.is_paused:
                     print("[Sync] Pausing monitoring (on lunch)")
                     self.pause_monitoring()
             else:
-                # Should be stopped
                 if self.is_monitoring:
                     print("[Sync] Stopping monitoring (clocked out)")
                     self.stop_monitoring()
@@ -235,21 +222,14 @@ class ScreenshotMonitor:
             return
         
         try:
-            # Capture
             image_bytes = self.capture_screenshot()
-            
-            # Upload
             result = self.upload_screenshot(image_bytes)
             
             if result.get('success'):
-                # Process queue
                 self.process_queue()
-                
-                # Notify UI
                 if self.on_screenshot_captured:
                     self.on_screenshot_captured('success')
             else:
-                # Queue for retry
                 self.upload_queue.append({
                     'image': base64.b64encode(image_bytes).decode('utf-8'),
                     'timestamp': datetime.now().isoformat(),
@@ -273,14 +253,10 @@ class ScreenshotMonitor:
         
         for item in self.upload_queue:
             try:
-                # Decode image
                 image_bytes = base64.b64decode(item['image'])
-                
-                # Try upload
                 result = self.upload_screenshot(image_bytes)
                 
                 if not result.get('success'):
-                    # Retry
                     item['retry_count'] = item.get('retry_count', 0) + 1
                     if item['retry_count'] < CONFIG['MAX_RETRY_ATTEMPTS']:
                         items_to_retry.append(item)
@@ -305,13 +281,10 @@ class ScreenshotMonitor:
         self.is_monitoring = True
         self.is_paused = False
         
-        # Schedule captures
         schedule.every(CONFIG['CAPTURE_INTERVAL_MINUTES']).minutes.do(self.capture_and_upload)
         
-        # First capture after 5 seconds
         threading.Timer(5.0, self.capture_and_upload).start()
         
-        # Notify UI
         if self.on_status_changed:
             self.on_status_changed()
         
@@ -326,10 +299,8 @@ class ScreenshotMonitor:
         self.is_monitoring = False
         self.is_paused = False
         
-        # Clear schedule
         schedule.clear()
         
-        # Notify UI
         if self.on_status_changed:
             self.on_status_changed()
         
@@ -343,7 +314,6 @@ class ScreenshotMonitor:
         print("[Monitor] Pausing...")
         self.is_paused = True
         
-        # Notify UI
         if self.on_status_changed:
             self.on_status_changed()
     
@@ -355,14 +325,12 @@ class ScreenshotMonitor:
         print("[Monitor] Resuming...")
         self.is_paused = False
         
-        # Notify UI
         if self.on_status_changed:
             self.on_status_changed()
     
     def login(self, username, password):
         """Login with credentials"""
         try:
-            # Verify credentials
             response = requests.post(
                 CONFIG['STATUS_URL'],
                 json={'username': username, 'password': password},
@@ -375,10 +343,7 @@ class ScreenshotMonitor:
                     self.credentials = {'username': username, 'password': password}
                     self.save_config()
                     
-                    # Start sync
                     self.sync_with_tracker()
-                    
-                    # Schedule status checks every 30 seconds
                     schedule.every(CONFIG['STATUS_CHECK_SECONDS']).seconds.do(self.sync_with_tracker)
                     
                     return {'success': True}
@@ -391,7 +356,7 @@ class ScreenshotMonitor:
             return {'success': False, 'message': str(e)}
     
     def logout(self):
-        """Logout"""
+        """Logout - clears credentials from memory but keeps saved config"""
         self.stop_monitoring()
         self.credentials = None
         self.save_config()
@@ -407,10 +372,8 @@ class ScreenshotMonitor:
 monitor = ScreenshotMonitor()
 
 if __name__ == '__main__':
-    # Auto-login if credentials exist
     if monitor.credentials:
         monitor.sync_with_tracker()
         schedule.every(CONFIG['STATUS_CHECK_SECONDS']).seconds.do(monitor.sync_with_tracker)
     
-    # Run scheduler
     monitor.run_scheduler()
