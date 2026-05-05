@@ -43,6 +43,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install pyinstaller
           pip install -r requirements.txt
+          pip install rumps pyobjc-framework-Cocoa
       - name: Build app bundle
         run: pyinstaller ghv-monitor.spec --clean
       - name: Debug - check dist folder
