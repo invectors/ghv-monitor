@@ -1,8 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
 
-import sys
-import os
-
 block_cipher = None
 
 a = Analysis(
@@ -12,17 +9,7 @@ a = Analysis(
     datas=[],
     hiddenimports=[
         'PIL._tkinter_finder',
-        'pystray._appindicator',
-        'pystray._darwin',
-        'pystray._win32',
-        'pystray._xorg',
         'schedule',
-        'rumps',
-        'Foundation',
-        'AppKit',
-        'ApplicationServices',
-        'CoreFoundation',
-        'PyObjCTools',
     ],
     hookspath=[],
     hooksconfig={},
