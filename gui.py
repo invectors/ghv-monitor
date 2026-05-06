@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-GHV Monitor - GUI (NO PAUSE BUTTON VERSION)
-Simple Tk interface for login and status
+GHV Monitor - GUI (NO TRAY VERSION)
+Regular Tkinter window that shows in taskbar/dock
 """
 
 import tkinter as tk
@@ -29,22 +29,13 @@ class MonitorGUI:
         # Start scheduler in background
         threading.Thread(target=monitor.run_scheduler, daemon=True).start()
         
-        # Hide window instead of destroying when closed
-        self.root.protocol("WM_DELETE_WINDOW", self.hide_window)
+        # Normal close behavior — just quit the app
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
     
-    def hide_window(self):
-        """Hide window to system tray"""
-        self.root.withdraw()
-    
-    def show_window(self):
-        """Show window"""
-        self.root.deiconify()
-        self.root.lift()
-    
-    def clear_window(self):
-        """Clear all widgets"""
-        for widget in self.root.winfo_children():
-            widget.destroy()
+    def on_close(self):
+        """Normal window close — stop monitoring and quit"""
+        monitor.stop_monitoring()
+        self.root.destroy()
     
     def show_login_screen(self):
         """Show login screen"""
@@ -111,7 +102,6 @@ class MonitorGUI:
         # Login in background
         def login_thread():
             result = monitor.login(username, password)
-            
             # Update UI in main thread
             self.root.after(0, lambda: self.handle_login_result(result))
         
@@ -215,25 +205,19 @@ class MonitorGUI:
         
         if monitor.is_monitoring:
             if monitor.is_paused:
-                # Paused (yellow)
                 color = '#eab308'
                 self.status_title.config(text="Paused")
                 self.status_subtitle.config(text="Lunch break - monitoring paused")
             else:
-                # Active (green)
                 color = '#22c55e'
                 self.status_title.config(text="Monitoring Active")
                 self.status_subtitle.config(text="Capturing screenshots every 10 minutes")
         else:
-            # Stopped (gray)
             color = '#9ca3af'
             self.status_title.config(text="Not Active")
             self.status_subtitle.config(text="Waiting for clock in")
         
-        # Draw status dot
         self.status_dot.create_oval(4, 4, 16, 16, fill=color, outline='')
-        
-        # Update queue
         self.queue_label.config(text=str(len(monitor.upload_queue)))
     
     def on_screenshot(self, status):
@@ -247,6 +231,11 @@ class MonitorGUI:
         if messagebox.askyesno("Logout", "Are you sure you want to logout?"):
             monitor.logout()
             self.show_login_screen()
+    
+    def clear_window(self):
+        """Clear all widgets"""
+        for widget in self.root.winfo_children():
+            widget.destroy()
     
     def run(self):
         """Run the GUI"""
