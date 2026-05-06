@@ -38,12 +38,8 @@ class ScreenshotMonitor:
         print(f"[Config] Config directory: {self.config_dir}")
         print(f"[Config] Config file: {self.config_file}")
         
-        # Create config directory
-        try:
-            self.config_dir.mkdir(parents=True, exist_ok=True)
-            print(f"[Config] Directory created/verified")
-        except Exception as e:
-            print(f"[Config] ERROR creating directory: {e}")
+        # Create config directory with proper permissions
+        self._ensure_config_dir()
         
         # State
         self.is_monitoring = False
@@ -62,19 +58,52 @@ class ScreenshotMonitor:
     
     def _get_config_dir(self):
         """Get cross-platform config directory"""
-        # Use APPDATA on Windows, HOME on Unix
         if sys.platform == 'win32':
-            # Try APPDATA first, fallback to USERPROFILE
+            # Windows: Use APPDATA or fallback to USERPROFILE
             app_data = os.environ.get('APPDATA')
             if app_data:
                 return Path(app_data) / 'GHV-Monitor'
             user_profile = os.environ.get('USERPROFILE')
             if user_profile:
-                return Path(user_profile) / '.ghv-monitor'
-            return Path.home() / '.ghv-monitor'
+                return Path(user_profile) / 'GHV-Monitor'
+            return Path.home() / 'GHV-Monitor'
         else:
-            # macOS/Linux
-            return Path.home() / '.ghv-monitor'
+            # Linux/macOS: Use ~/.config/GHV-Monitor (XDG standard) or fallback to ~/.ghv-monitor
+            xdg_config = os.environ.get('XDG_CONFIG_HOME')
+            if xdg_config:
+                return Path(xdg_config) / 'GHV-Monitor'
+            return Path.home() / '.config' / 'GHV-Monitor'
+    
+    def _ensure_config_dir(self):
+        """Create config directory with error handling"""
+        try:
+            # Create with parents=True, exist_ok=True
+            self.config_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Verify it exists and is writable
+            if not self.config_dir.exists():
+                raise RuntimeError(f"Failed to create directory: {self.config_dir}")
+            
+            # Test write permission by creating a test file
+            test_file = self.config_dir / '.write_test'
+            try:
+                test_file.write_text('test')
+                test_file.unlink()  # Clean up
+                print(f"[Config] Directory verified and writable: {self.config_dir}")
+            except Exception as e:
+                print(f"[Config] Directory not writable: {e}")
+                raise
+                
+        except Exception as e:
+            print(f"[Config] ERROR creating directory: {e}")
+            # Fallback: use temp directory
+            import tempfile
+            fallback = Path(tempfile.gettempdir()) / 'GHV-Monitor'
+            print(f"[Config] Using fallback: {fallback}")
+            fallback.mkdir(parents=True, exist_ok=True)
+            self.config_dir = fallback
+            self.config_file = self.config_dir / 'config.json'
+            self.queue_file = self.config_dir / 'queue.json'
     
     def load_config(self):
         """Load saved configuration"""
@@ -83,12 +112,13 @@ class ScreenshotMonitor:
         
         if self.config_file.exists():
             try:
-                with open(self.config_file, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    self.credentials = data.get('credentials')
-                    print(f"[Config] Loaded credentials: {self.credentials is not None}")
-                    if self.credentials:
-                        print(f"[Config] Username: {self.credentials.get('username', 'N/A')}")
+                content = self.config_file.read_text(encoding='utf-8')
+                print(f"[Config] File content length: {len(content)}")
+                data = json.loads(content)
+                self.credentials = data.get('credentials')
+                print(f"[Config] Loaded credentials: {self.credentials is not None}")
+                if self.credentials:
+                    print(f"[Config] Username: {self.credentials.get('username', 'N/A')}")
             except Exception as e:
                 print(f"[Config] Error loading config: {e}")
                 self.credentials = None
@@ -97,19 +127,38 @@ class ScreenshotMonitor:
             self.credentials = None
     
     def save_config(self):
-        """Save configuration"""
+        """Save configuration - FORCE WRITE"""
         print(f"[Config] Saving to: {self.config_file}")
+        print(f"[Config] Current credentials: {self.credentials}")
+        
         try:
             # Ensure directory exists
             self.config_dir.mkdir(parents=True, exist_ok=True)
             
-            with open(self.config_file, 'w', encoding='utf-8') as f:
-                json.dump({
-                    'credentials': self.credentials
-                }, f, indent=2)
-            print("[Config] Saved successfully")
+            # Write atomically: temp file then rename
+            temp_file = self.config_file.with_suffix('.tmp')
+            data = {'credentials': self.credentials}
+            
+            # Write to temp file
+            temp_file.write_text(json.dumps(data, indent=2), encoding='utf-8')
+            print(f"[Config] Temp file written: {temp_file}")
+            
+            # Rename to final (atomic on most systems)
+            temp_file.replace(self.config_file)
+            print(f"[Config] Renamed to: {self.config_file}")
+            
+            # Verify
+            if self.config_file.exists():
+                verify = self.config_file.read_text(encoding='utf-8')
+                print(f"[Config] Verified write: {len(verify)} bytes")
+                print("[Config] Saved successfully")
+            else:
+                print("[Config] CRITICAL: File not found after save!")
+                
         except Exception as e:
-            print(f"[Config] Error saving config: {e}")
+            print(f"[Config] ERROR saving config: {e}")
+            import traceback
+            traceback.print_exc()
     
     def clear_saved_credentials(self):
         """Remove saved credentials when login fails"""
@@ -133,6 +182,7 @@ class ScreenshotMonitor:
     
     def save_queue(self):
         try:
+            self.config_dir.mkdir(parents=True, exist_ok=True)
             with open(self.queue_file, 'w', encoding='utf-8') as f:
                 json.dump(self.upload_queue, f)
         except Exception as e:
@@ -361,7 +411,7 @@ class ScreenshotMonitor:
             self.on_status_changed()
     
     def login(self, username, password):
-        """Login with credentials - clears saved creds on failure"""
+        """Login with credentials"""
         try:
             print(f"[Login] Attempting login for {username}...")
             print(f"[Login] URL: {CONFIG['STATUS_URL']}")
@@ -380,7 +430,7 @@ class ScreenshotMonitor:
                 
                 if data.get('success'):
                     self.credentials = {'username': username, 'password': password}
-                    self.save_config()
+                    self.save_config()  # This should now work!
                     
                     self.sync_with_tracker()
                     schedule.every(CONFIG['STATUS_CHECK_SECONDS']).seconds.do(self.sync_with_tracker)
