@@ -2,6 +2,3 @@ mss==9.0.1
 Pillow==10.2.0
 requests==2.31.0
 schedule==1.2.1
-pystray==0.19.5
-rumps>=0.4.0; sys_platform == 'darwin'
-pyobjc-framework-Cocoa>=9.0; sys_platform == 'darwin'
