@@ -30,68 +30,113 @@ CONFIG = {
 
 class ScreenshotMonitor:
     def __init__(self):
-        self.config_dir = Path.home() / '.ghv-monitor'
+        # Cross-platform config directory
+        self.config_dir = self._get_config_dir()
         self.config_file = self.config_dir / 'config.json'
         self.queue_file = self.config_dir / 'queue.json'
         
-        self.config_dir.mkdir(exist_ok=True)
+        print(f"[Config] Config directory: {self.config_dir}")
+        print(f"[Config] Config file: {self.config_file}")
         
+        # Create config directory
+        try:
+            self.config_dir.mkdir(parents=True, exist_ok=True)
+            print(f"[Config] Directory created/verified")
+        except Exception as e:
+            print(f"[Config] ERROR creating directory: {e}")
+        
+        # State
         self.is_monitoring = False
         self.is_paused = False
         self.session_active = False
         self.credentials = None
         self.upload_queue = []
         
+        # Load saved data
         self.load_config()
         self.load_queue()
         
+        # Callbacks for UI
         self.on_status_changed = None
         self.on_screenshot_captured = None
-        
+    
+    def _get_config_dir(self):
+        """Get cross-platform config directory"""
+        # Use APPDATA on Windows, HOME on Unix
+        if sys.platform == 'win32':
+            # Try APPDATA first, fallback to USERPROFILE
+            app_data = os.environ.get('APPDATA')
+            if app_data:
+                return Path(app_data) / 'GHV-Monitor'
+            user_profile = os.environ.get('USERPROFILE')
+            if user_profile:
+                return Path(user_profile) / '.ghv-monitor'
+            return Path.home() / '.ghv-monitor'
+        else:
+            # macOS/Linux
+            return Path.home() / '.ghv-monitor'
+    
     def load_config(self):
         """Load saved configuration"""
+        print(f"[Config] Loading from: {self.config_file}")
+        print(f"[Config] File exists: {self.config_file.exists()}")
+        
         if self.config_file.exists():
             try:
-                with open(self.config_file, 'r') as f:
+                with open(self.config_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                     self.credentials = data.get('credentials')
+                    print(f"[Config] Loaded credentials: {self.credentials is not None}")
+                    if self.credentials:
+                        print(f"[Config] Username: {self.credentials.get('username', 'N/A')}")
             except Exception as e:
-                print(f"Error loading config: {e}")
+                print(f"[Config] Error loading config: {e}")
+                self.credentials = None
+        else:
+            print("[Config] No config file found")
+            self.credentials = None
     
     def save_config(self):
         """Save configuration"""
+        print(f"[Config] Saving to: {self.config_file}")
         try:
-            with open(self.config_file, 'w') as f:
+            # Ensure directory exists
+            self.config_dir.mkdir(parents=True, exist_ok=True)
+            
+            with open(self.config_file, 'w', encoding='utf-8') as f:
                 json.dump({
                     'credentials': self.credentials
-                }, f)
+                }, f, indent=2)
+            print("[Config] Saved successfully")
         except Exception as e:
-            print(f"Error saving config: {e}")
+            print(f"[Config] Error saving config: {e}")
     
     def clear_saved_credentials(self):
         """Remove saved credentials when login fails"""
+        print("[Config] Clearing saved credentials")
         self.credentials = None
         try:
             if self.config_file.exists():
                 self.config_file.unlink()
+                print("[Config] Config file deleted")
         except Exception as e:
-            print(f"Error clearing config: {e}")
+            print(f"[Config] Error clearing config: {e}")
     
     def load_queue(self):
         if self.queue_file.exists():
             try:
-                with open(self.queue_file, 'r') as f:
+                with open(self.queue_file, 'r', encoding='utf-8') as f:
                     self.upload_queue = json.load(f)
-                print(f"Loaded {len(self.upload_queue)} items from queue")
+                print(f"[Queue] Loaded {len(self.upload_queue)} items")
             except Exception as e:
-                print(f"Error loading queue: {e}")
+                print(f"[Queue] Error loading queue: {e}")
     
     def save_queue(self):
         try:
-            with open(self.queue_file, 'w') as f:
+            with open(self.queue_file, 'w', encoding='utf-8') as f:
                 json.dump(self.upload_queue, f)
         except Exception as e:
-            print(f"Error saving queue: {e}")
+            print(f"[Queue] Error saving queue: {e}")
     
     def capture_screenshot(self):
         try:
@@ -342,7 +387,6 @@ class ScreenshotMonitor:
                     
                     return {'success': True}
                 else:
-                    # Login rejected by server - clear any saved credentials
                     self.clear_saved_credentials()
                     return {'success': False, 'message': data.get('message', 'Invalid credentials')}
             else:
