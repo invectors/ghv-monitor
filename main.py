@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
 GHV Monitor - Desktop Screenshot Monitor
-Main application file - FIXED VERSION
 """
 
 import os
@@ -35,21 +34,17 @@ class ScreenshotMonitor:
         self.config_file = self.config_dir / 'config.json'
         self.queue_file = self.config_dir / 'queue.json'
         
-        # Create config directory
         self.config_dir.mkdir(exist_ok=True)
         
-        # State
         self.is_monitoring = False
         self.is_paused = False
         self.session_active = False
         self.credentials = None
         self.upload_queue = []
         
-        # Load saved data
         self.load_config()
         self.load_queue()
         
-        # Callbacks for UI
         self.on_status_changed = None
         self.on_screenshot_captured = None
         
@@ -73,8 +68,16 @@ class ScreenshotMonitor:
         except Exception as e:
             print(f"Error saving config: {e}")
     
+    def clear_saved_credentials(self):
+        """Remove saved credentials when login fails"""
+        self.credentials = None
+        try:
+            if self.config_file.exists():
+                self.config_file.unlink()
+        except Exception as e:
+            print(f"Error clearing config: {e}")
+    
     def load_queue(self):
-        """Load upload queue"""
         if self.queue_file.exists():
             try:
                 with open(self.queue_file, 'r') as f:
@@ -84,7 +87,6 @@ class ScreenshotMonitor:
                 print(f"Error loading queue: {e}")
     
     def save_queue(self):
-        """Save upload queue"""
         try:
             with open(self.queue_file, 'w') as f:
                 json.dump(self.upload_queue, f)
@@ -92,10 +94,8 @@ class ScreenshotMonitor:
             print(f"Error saving queue: {e}")
     
     def capture_screenshot(self):
-        """Capture desktop screenshot"""
         try:
             print("[Screenshot] Capturing desktop...")
-            
             with mss.mss() as sct:
                 monitor = sct.monitors[0]
                 screenshot = sct.grab(monitor)
@@ -112,13 +112,11 @@ class ScreenshotMonitor:
                 
                 print(f"[Screenshot] Captured ({len(img_bytes)} bytes)")
                 return img_bytes
-                
         except Exception as e:
             print(f"[Screenshot] Error: {e}")
             raise
     
     def upload_screenshot(self, image_bytes):
-        """Upload screenshot to server"""
         try:
             if not self.credentials:
                 raise Exception("Not logged in")
@@ -126,8 +124,6 @@ class ScreenshotMonitor:
             base64_image = base64.b64encode(image_bytes).decode('utf-8')
             
             print("[Upload] Uploading screenshot...")
-            print(f"[Upload] URL: {CONFIG['UPLOAD_URL']}")
-            print(f"[Upload] Image size: {len(image_bytes)} bytes")
             
             response = requests.post(
                 CONFIG['UPLOAD_URL'],
@@ -143,12 +139,11 @@ class ScreenshotMonitor:
             )
             
             print(f"[Upload] Response code: {response.status_code}")
-            print(f"[Upload] Response body: {response.text[:500]}")
             
             if response.status_code == 200:
                 data = response.json()
                 if data.get('success'):
-                    print(f"[Upload] Success: {data.get('message')}")
+                    print(f"[Upload] Success")
                     return {'success': True, 'data': data}
                 else:
                     raise Exception(data.get('message', 'Upload failed'))
@@ -164,7 +159,6 @@ class ScreenshotMonitor:
             raise
     
     def check_status(self):
-        """Check session status with server"""
         try:
             if not self.credentials:
                 return {'active': False}
@@ -187,7 +181,6 @@ class ScreenshotMonitor:
             return {'active': False}
     
     def sync_with_tracker(self):
-        """Sync monitoring state with time tracker"""
         try:
             print("[Sync] Checking status...")
             status = self.check_status()
@@ -216,7 +209,6 @@ class ScreenshotMonitor:
             print(f"[Sync] Error: {e}")
     
     def capture_and_upload(self):
-        """Capture screenshot and upload"""
         if not self.is_monitoring or self.is_paused:
             print("[Capture] Skipping (not monitoring or paused)")
             return
@@ -243,7 +235,6 @@ class ScreenshotMonitor:
                 self.on_screenshot_captured('error')
     
     def process_queue(self):
-        """Process upload queue"""
         if not self.upload_queue:
             return
         
@@ -273,7 +264,6 @@ class ScreenshotMonitor:
         self.save_queue()
     
     def start_monitoring(self):
-        """Start screenshot monitoring"""
         if self.is_monitoring:
             return
         
@@ -291,7 +281,6 @@ class ScreenshotMonitor:
         print("[Monitor] Started")
     
     def stop_monitoring(self):
-        """Stop screenshot monitoring"""
         if not self.is_monitoring:
             return
         
@@ -307,7 +296,6 @@ class ScreenshotMonitor:
         print("[Monitor] Stopped")
     
     def pause_monitoring(self):
-        """Pause monitoring (lunch break)"""
         if not self.is_monitoring or self.is_paused:
             return
         
@@ -318,7 +306,6 @@ class ScreenshotMonitor:
             self.on_status_changed()
     
     def resume_monitoring(self):
-        """Resume monitoring"""
         if not self.is_monitoring or not self.is_paused:
             return
         
@@ -329,16 +316,23 @@ class ScreenshotMonitor:
             self.on_status_changed()
     
     def login(self, username, password):
-        """Login with credentials"""
+        """Login with credentials - clears saved creds on failure"""
         try:
+            print(f"[Login] Attempting login for {username}...")
+            print(f"[Login] URL: {CONFIG['STATUS_URL']}")
+            
             response = requests.post(
                 CONFIG['STATUS_URL'],
                 json={'username': username, 'password': password},
                 timeout=10
             )
             
+            print(f"[Login] Response code: {response.status_code}")
+            
             if response.status_code == 200:
                 data = response.json()
+                print(f"[Login] Response: {data}")
+                
                 if data.get('success'):
                     self.credentials = {'username': username, 'password': password}
                     self.save_config()
@@ -348,22 +342,34 @@ class ScreenshotMonitor:
                     
                     return {'success': True}
                 else:
-                    return {'success': False, 'message': data.get('message')}
+                    # Login rejected by server - clear any saved credentials
+                    self.clear_saved_credentials()
+                    return {'success': False, 'message': data.get('message', 'Invalid credentials')}
             else:
-                return {'success': False, 'message': 'Connection failed'}
+                self.clear_saved_credentials()
+                return {'success': False, 'message': f'Server error: HTTP {response.status_code}'}
                 
+        except requests.exceptions.ConnectionError as e:
+            print(f"[Login] Connection error: {e}")
+            self.clear_saved_credentials()
+            return {'success': False, 'message': 'Connection failed. Check your internet connection.'}
+        except requests.exceptions.Timeout as e:
+            print(f"[Login] Timeout: {e}")
+            self.clear_saved_credentials()
+            return {'success': False, 'message': 'Connection timed out. Server may be down.'}
         except Exception as e:
-            return {'success': False, 'message': str(e)}
+            print(f"[Login] Error: {e}")
+            self.clear_saved_credentials()
+            return {'success': False, 'message': f'Error: {str(e)}'}
     
     def logout(self):
-        """Logout - clears credentials from memory but keeps saved config"""
+        """Logout - clears everything"""
         self.stop_monitoring()
         self.credentials = None
-        self.save_config()
+        self.clear_saved_credentials()
         schedule.clear()
     
     def run_scheduler(self):
-        """Run the scheduler loop"""
         while True:
             schedule.run_pending()
             time.sleep(1)
