@@ -30,12 +30,55 @@ except ImportError:
 CONFIG = {
     'UPLOAD_URL': 'https://hub.gohirevirtual.net/api/screenshots/upload.php',
     'STATUS_URL': 'https://hub.gohirevirtual.net/api/screenshots/status.php',
+    'IDLE_URL':   'https://hub.gohirevirtual.net/api/screenshots/idle.php',
     'CAPTURE_INTERVAL_MINUTES': 10,
     'STATUS_CHECK_SECONDS': 30,
+    'IDLE_CHECK_INTERVAL_SECONDS': 15,           # how often to poll OS for idle time
+    'IDLE_DETECTION_THRESHOLD_SECONDS': 300,     # 5 min of no input = idle
     'MAX_RETRY_ATTEMPTS': 3,
     'IMAGE_QUALITY': 85,
     'MAX_IMAGE_WIDTH': 1920,
 }
+
+class IdleDetector:
+    """Cross-platform OS idle detector using pynput input listeners.
+
+    Tracks the wall-clock time of the most recent keyboard or mouse event.
+    `get_idle_seconds()` returns how long it's been since any input.
+    """
+    def __init__(self):
+        self.last_input_time = time.time()
+        self._listeners = []
+        self._started = False
+
+    def _on_activity(self, *args, **kwargs):
+        self.last_input_time = time.time()
+
+    def start(self):
+        if self._started or not PYNPUT_AVAILABLE:
+            return
+        try:
+            kb_listener = keyboard.Listener(on_press=self._on_activity)
+            ms_listener = mouse.Listener(
+                on_move=self._on_activity,
+                on_click=self._on_activity,
+                on_scroll=self._on_activity,
+            )
+            kb_listener.daemon = True
+            ms_listener.daemon = True
+            kb_listener.start()
+            ms_listener.start()
+            self._listeners = [kb_listener, ms_listener]
+            self._started = True
+            print("[Idle] Detector started")
+        except Exception as e:
+            # Most common on Wayland or restricted/headless systems
+            print(f"[Idle] Failed to start listeners: {e}")
+
+    def get_idle_seconds(self):
+        if not self._started:
+            return 0.0
+        return time.time() - self.last_input_time
 
 class ScreenshotMonitor:
     def __init__(self):
@@ -56,6 +99,10 @@ class ScreenshotMonitor:
         self.session_active = False
         self.credentials = None
         self.upload_queue = []
+
+        # Idle detection state
+        self.idle_detector = IdleDetector()
+        self.is_idle = False  # True between sending 'start' and 'end' events
         
         # Load saved data
         self.load_config()
@@ -311,12 +358,71 @@ class ScreenshotMonitor:
             
         except Exception as e:
             print(f"[Sync] Error: {e}")
+
+    def send_idle_event(self, event_type, when_utc):
+        """POST an idle 'start' or 'end' event to the server.
+
+        when_utc: a timezone-aware datetime in UTC
+        """
+        if not self.credentials:
+            return
+        try:
+            timestamp = when_utc.strftime('%Y-%m-%d %H:%M:%S')
+            response = requests.post(
+                CONFIG['IDLE_URL'],
+                json={
+                    'event': event_type,        # 'start' or 'end'
+                    'timestamp': timestamp,     # UTC, MySQL DATETIME format
+                    'idle_type': 'idle',
+                },
+                headers={
+                    'Content-Type': 'application/json',
+                    'Authorization': f"Bearer {self.credentials['username']}:{self.credentials['password']}",
+                },
+                timeout=10,
+            )
+            if response.status_code == 200:
+                print(f"[Idle] {event_type} event sent (timestamp UTC: {timestamp})")
+            else:
+                print(f"[Idle] {event_type} event failed: HTTP {response.status_code} — {response.text[:200]}")
+        except Exception as e:
+            print(f"[Idle] Error sending {event_type}: {e}")
+
+    def check_idle(self):
+        """Periodic idle-state check — runs every IDLE_CHECK_INTERVAL_SECONDS.
+
+        Transitions:
+          - not idle → idle: when idle_seconds crosses the threshold
+          - idle → not idle: when idle_seconds drops back below the threshold
+        """
+        if not self.is_monitoring or self.is_paused:
+            return
+        if not PYNPUT_AVAILABLE:
+            return
+
+        idle_seconds = self.idle_detector.get_idle_seconds()
+        threshold = CONFIG['IDLE_DETECTION_THRESHOLD_SECONDS']
+
+        if idle_seconds >= threshold and not self.is_idle:
+            # User became idle. The actual start was `idle_seconds` ago.
+            idle_start_utc = datetime.now(timezone.utc) - timedelta(seconds=int(idle_seconds))
+            print(f"[Idle] User went idle ({int(idle_seconds)}s since last input)")
+            self.is_idle = True
+            self.send_idle_event('start', idle_start_utc)
+
+        elif idle_seconds < threshold and self.is_idle:
+            # User returned to activity. End event timestamp = now.
+            print(f"[Idle] User returned to activity")
+            self.is_idle = False
+            self.send_idle_event('end', datetime.now(timezone.utc))
     
     def capture_and_upload(self):
         if not self.is_monitoring or self.is_paused:
             print("[Capture] Skipping (not monitoring or paused)")
             return
-        
+        if self.is_idle:
+            print("[Capture] Skipping (user is idle)")
+            return
         try:
             image_bytes = self.capture_screenshot()
             result = self.upload_screenshot(image_bytes)
@@ -370,13 +476,15 @@ class ScreenshotMonitor:
     def start_monitoring(self):
         if self.is_monitoring:
             return
-        
         print("[Monitor] Starting...")
         self.is_monitoring = True
         self.is_paused = False
-        
+
+        # Begin OS idle detection (idempotent — safe to call repeatedly)
+        self.idle_detector.start()
+        schedule.every(CONFIG['IDLE_CHECK_INTERVAL_SECONDS']).seconds.do(self.check_idle)
+
         schedule.every(CONFIG['CAPTURE_INTERVAL_MINUTES']).minutes.do(self.capture_and_upload)
-        
         threading.Timer(5.0, self.capture_and_upload).start()
         
         if self.on_status_changed:
@@ -387,11 +495,16 @@ class ScreenshotMonitor:
     def stop_monitoring(self):
         if not self.is_monitoring:
             return
-        
         print("[Monitor] Stopping...")
+
+        # If we're currently in an idle period, close it server-side so the
+        # cron alert pipeline doesn't see an unbounded open period.
+        if self.is_idle:
+            self.send_idle_event('end', datetime.now(timezone.utc))
+            self.is_idle = False
+
         self.is_monitoring = False
         self.is_paused = False
-        
         schedule.clear()
         
         if self.on_status_changed:
