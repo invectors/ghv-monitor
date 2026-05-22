@@ -9,13 +9,22 @@ import time
 import json
 import threading
 import schedule
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
+
 import mss
 import requests
 from PIL import Image
 from io import BytesIO
 import base64
+
+# Idle detection (pynput) — optional, gracefully degrades if not available
+try:
+    from pynput import keyboard, mouse
+    PYNPUT_AVAILABLE = True
+except ImportError:
+    PYNPUT_AVAILABLE = False
+    print("[Idle] pynput not available — idle detection disabled")
 
 # Configuration
 CONFIG = {
