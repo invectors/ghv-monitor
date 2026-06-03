@@ -286,7 +286,9 @@ class ScreenshotMonitor:
                     'Content-Type': 'application/json',
                     'Authorization': f"Bearer {self.credentials['username']}:{self.credentials['password']}"
                 },
-                timeout=30
+                # Screenshot uploads are ~150-300KB; allow generous read time
+                # on slow connections, especially Windows after sleep/wake.
+                timeout=(15, 60)
             )
             
             print(f"[Upload] Response code: {response.status_code}")
@@ -310,34 +312,80 @@ class ScreenshotMonitor:
             raise
     
     def check_status(self):
+        """Check status with the server.
+
+        Returns:
+            dict with at least 'active' key — server's response
+            None — could not determine (network error, timeout, transient 5xx);
+                   caller should KEEP current state, not transition
+            {'auth_failed': True} — credentials rejected (401); caller should
+                                   stop and prompt re-login
+        """
         try:
             if not self.credentials:
-                return {'active': False}
-            
+                return None  # No credentials = nothing to check
+
             response = requests.get(
                 CONFIG['STATUS_URL'],
                 headers={
                     'Authorization': f"Bearer {self.credentials['username']}:{self.credentials['password']}"
                 },
-                timeout=10
+                # (connect_timeout, read_timeout) — generous for Windows
+                # network stack quirks and sleep/wake recovery
+                timeout=(15, 30)
             )
-            
+
             if response.status_code == 200:
-                return response.json()
-            else:
-                return {'active': False}
-                
+                try:
+                    return response.json()
+                except ValueError as e:
+                    print(f"[Status] Server returned non-JSON 200: {e}")
+                    return None  # Transient — server hiccup
+
+            if response.status_code == 401:
+                print("[Status] Authentication rejected (401)")
+                return {'auth_failed': True}
+
+            # Any other status (5xx, 502, 503, 504, etc.) is transient
+            print(f"[Status] Transient HTTP {response.status_code} — keeping current state")
+            return None
+
+        except requests.exceptions.Timeout:
+            print("[Status] Request timed out — keeping current state")
+            return None
+        except requests.exceptions.ConnectionError as e:
+            # Most common Windows failure mode — DNS, reset, refused
+            print(f"[Status] Connection error — keeping current state: {e}")
+            return None
         except Exception as e:
-            print(f"[Status] Error: {e}")
-            return {'active': False}
+            print(f"[Status] Unexpected error — keeping current state: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
     
     def sync_with_tracker(self):
         try:
             print("[Sync] Checking status...")
             status = self.check_status()
-            
+
+            # status is None when we couldn't determine — keep current state.
+            # This prevents transient network failures from flipping the app
+            # into "offline waiting for clockin" state.
+            if status is None:
+                print("[Sync] Could not determine status — keeping current state")
+                return
+
+            # Auth was rejected. Stop monitoring and let user re-login.
+            if status.get('auth_failed'):
+                print("[Sync] Auth failed — stopping monitoring, credentials need refresh")
+                if self.is_monitoring:
+                    self.stop_monitoring()
+                # Don't auto-clear credentials here — let the user see the
+                # login screen and decide; clearing silently is worse UX.
+                return
+
             print(f"[Sync] Status: active={status.get('active')}, clocked_in={status.get('clocked_in')}, on_lunch={status.get('on_lunch')}")
-            
+
             if status.get('active') and status.get('clocked_in') and not status.get('on_lunch'):
                 if not self.is_monitoring:
                     print("[Sync] Starting monitoring (clocked in)")
@@ -350,14 +398,18 @@ class ScreenshotMonitor:
                     print("[Sync] Pausing monitoring (on lunch)")
                     self.pause_monitoring()
             else:
+                # Server confirmed: NOT clocked in. This is the only path that
+                # stops monitoring on a "clocked out" signal — and it requires
+                # a successful, parseable HTTP 200 response that said so.
                 if self.is_monitoring:
-                    print("[Sync] Stopping monitoring (clocked out)")
+                    print("[Sync] Stopping monitoring (server confirmed clocked out)")
                     self.stop_monitoring()
-            
+
             self.session_active = status.get('active', False)
-            
         except Exception as e:
             print(f"[Sync] Error: {e}")
+            import traceback
+            traceback.print_exc()
 
     def send_idle_event(self, event_type, when_utc):
         """POST an idle 'start' or 'end' event to the server.
@@ -586,9 +638,29 @@ class ScreenshotMonitor:
         schedule.clear()
     
     def run_scheduler(self):
+        """Main scheduler loop. Must never die from an exception —
+        if it does, the app silently stops working while the tray icon
+        keeps showing the last-known state."""
+        print("[Scheduler] Loop started")
+        consecutive_errors = 0
         while True:
-            schedule.run_pending()
-            time.sleep(1)
+            try:
+                schedule.run_pending()
+                consecutive_errors = 0
+            except Exception as e:
+                consecutive_errors += 1
+                print(f"[Scheduler] Error in run_pending (#{consecutive_errors}): {e}")
+                import traceback
+                traceback.print_exc()
+                # Back off slightly on repeated failures, but never give up
+                if consecutive_errors > 10:
+                    time.sleep(5)
+            try:
+                time.sleep(1)
+            except Exception:
+                # Even sleep can fail in extreme edge cases (signal interrupts
+                # on Windows during sleep/wake). Don't let it kill us.
+                pass
 
 # Global instance
 monitor = ScreenshotMonitor()
