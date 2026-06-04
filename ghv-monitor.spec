@@ -1,6 +1,12 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+import os
+
 block_cipher = None
+
+# Allow CI to pin the macOS architecture (e.g. 'x86_64' or 'arm64').
+# Falls back to None = "build for the current runner" when unset.
+TARGET_ARCH = os.environ.get('GHV_TARGET_ARCH') or None
 
 a = Analysis(
     ['app.py'],
@@ -40,7 +46,7 @@ exe = EXE(
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=True,
-    target_arch=None,
+    target_arch=TARGET_ARCH,
     codesign_identity=None,
     entitlements_file=None,
 )
