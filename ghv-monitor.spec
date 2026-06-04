@@ -16,6 +16,7 @@ a = Analysis(
     hiddenimports=[
         'PIL._tkinter_finder',
         'schedule',
+        'Quartz',
     ],
     hookspath=[],
     hooksconfig={},
