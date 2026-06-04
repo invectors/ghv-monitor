@@ -31,80 +31,69 @@ jobs:
           name: GHV-Monitor-Windows
           path: installer/*.exe
 
-  build-macos-arm64:
+  build-macos-universal:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Install dependencies
+      - name: Install build tooling
         run: |
           python -m pip install --upgrade pip
-          pip install pyinstaller
-          pip install -r requirements.txt
-      - name: Build app bundle
+          pip install pyinstaller delocate
+      - name: Install pure-Python deps (mss, pynput, requests, schedule)
+        run: |
+          # These ship arch-independent wheels; install everything except
+          # Pillow, which is handled via a fused universal2 wheel below.
+          grep -iv '^pillow' requirements.txt > requirements.nopillow.txt
+          pip install -r requirements.nopillow.txt
+      - name: Build & install a universal2 Pillow
+        run: |
+          PILLOW_VER="$(grep -i '^pillow' requirements.txt | cut -d'=' -f3)"
+          echo "Fusing universal2 Pillow ${PILLOW_VER}"
+          mkdir -p wheels fused
+          # Pillow publishes separate x86_64 and arm64 wheels (no universal2),
+          # so download both for cp312/macOS and fuse them.
+          pip download "Pillow==${PILLOW_VER}" --no-deps -d wheels \
+            --platform macosx_10_13_x86_64 --only-binary=:all: \
+            --python-version 312 --implementation cp --abi cp312
+          pip download "Pillow==${PILLOW_VER}" --no-deps -d wheels \
+            --platform macosx_11_0_arm64 --only-binary=:all: \
+            --python-version 312 --implementation cp --abi cp312
+          X86_WHL="$(ls wheels/*x86_64*.whl)"
+          ARM_WHL="$(ls wheels/*arm64*.whl)"
+          echo "x86_64 wheel: $X86_WHL"
+          echo "arm64  wheel: $ARM_WHL"
+          # delocate-merge (delocate>=0.12) replaces the old delocate-fuse;
+          # it writes a new auto-named universal2 wheel into -w dir.
+          delocate-merge "$X86_WHL" "$ARM_WHL" -w fused
+          FUSED_WHL="$(ls fused/*.whl)"
+          echo "Fused wheel: $FUSED_WHL"
+          # Sanity-check the fused name actually says universal2.
+          case "$FUSED_WHL" in
+            *universal2*) echo "OK: fused wheel is universal2" ;;
+            *) echo "ERROR: fused wheel is not universal2: $FUSED_WHL"; exit 1 ;;
+          esac
+          pip install "$FUSED_WHL"
+      - name: Build universal2 app bundle
         env:
-          GHV_TARGET_ARCH: arm64
+          GHV_TARGET_ARCH: universal2
         run: pyinstaller ghv-monitor.spec --clean
       - name: Debug - check dist folder
         run: ls -la dist/
-      - name: Ad-hoc sign app
-        run: |
-          if [ -d "dist/GHV Monitor.app" ]; then
-            codesign --force --deep --sign - "dist/GHV Monitor.app"
-          else
-            echo "ERROR: App bundle not found!"
-            ls -R dist/
-            exit 1
-          fi
-      - name: Install create-dmg
-        run: brew install create-dmg
-      - name: Create DMG
-        run: |
-          if [ -d "dist/GHV Monitor.app" ]; then
-            create-dmg \
-              --volname "GHV Monitor" \
-              --window-size 800 400 \
-              --icon-size 100 \
-              --app-drop-link 600 185 \
-              "GHV-Monitor-arm64.dmg" \
-              "dist/GHV Monitor.app/" || \
-            (echo "create-dmg failed, falling back to hdiutil..." && \
-             hdiutil create -srcfolder "dist/GHV Monitor.app" -volname "GHV Monitor" -fs HFS+ -format UDZO "GHV-Monitor-arm64.dmg")
-          fi
-      - name: Upload macOS DMG (Apple Silicon)
-        uses: actions/upload-artifact@v4
-        with:
-          name: GHV-Monitor-macOS-arm64
-          path: GHV-Monitor-arm64.dmg
-
-  build-macos-intel:
-    runs-on: macos-13
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install pyinstaller
-          pip install -r requirements.txt
-      - name: Build app bundle
-        env:
-          GHV_TARGET_ARCH: x86_64
-        run: pyinstaller ghv-monitor.spec --clean
-      - name: Debug - check dist folder
-        run: ls -la dist/
-      - name: Verify architecture is x86_64
+      - name: Verify binary is universal2 (both arches present)
         run: |
           BIN="dist/GHV Monitor.app/Contents/MacOS/GHV-Monitor"
           file "$BIN"
-          if ! file "$BIN" | grep -q "x86_64"; then
-            echo "ERROR: built binary is not x86_64!"
-            exit 1
+          lipo -archs "$BIN" || true
+          if ! lipo -archs "$BIN" | grep -q "x86_64"; then
+            echo "ERROR: x86_64 slice missing — not universal!"; exit 1
           fi
+          if ! lipo -archs "$BIN" | grep -q "arm64"; then
+            echo "ERROR: arm64 slice missing — not universal!"; exit 1
+          fi
+          echo "OK: binary contains both x86_64 and arm64"
       - name: Ad-hoc sign app
         run: |
           if [ -d "dist/GHV Monitor.app" ]; then
@@ -124,16 +113,16 @@ jobs:
               --window-size 800 400 \
               --icon-size 100 \
               --app-drop-link 600 185 \
-              "GHV-Monitor-intel.dmg" \
+              "GHV-Monitor-universal.dmg" \
               "dist/GHV Monitor.app/" || \
             (echo "create-dmg failed, falling back to hdiutil..." && \
-             hdiutil create -srcfolder "dist/GHV Monitor.app" -volname "GHV Monitor" -fs HFS+ -format UDZO "GHV-Monitor-intel.dmg")
+             hdiutil create -srcfolder "dist/GHV Monitor.app" -volname "GHV Monitor" -fs HFS+ -format UDZO "GHV-Monitor-universal.dmg")
           fi
-      - name: Upload macOS DMG (Intel)
+      - name: Upload macOS DMG (Universal)
         uses: actions/upload-artifact@v4
         with:
-          name: GHV-Monitor-macOS-intel
-          path: GHV-Monitor-intel.dmg
+          name: GHV-Monitor-macOS-universal
+          path: GHV-Monitor-universal.dmg
 
   build-linux:
     runs-on: ubuntu-latest
