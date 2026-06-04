@@ -31,7 +31,7 @@ jobs:
           name: GHV-Monitor-Windows
           path: installer/*.exe
 
-  build-macos:
+  build-macos-arm64:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -44,6 +44,8 @@ jobs:
           pip install pyinstaller
           pip install -r requirements.txt
       - name: Build app bundle
+        env:
+          GHV_TARGET_ARCH: arm64
         run: pyinstaller ghv-monitor.spec --clean
       - name: Debug - check dist folder
         run: ls -la dist/
@@ -66,16 +68,72 @@ jobs:
               --window-size 800 400 \
               --icon-size 100 \
               --app-drop-link 600 185 \
-              "GHV-Monitor.dmg" \
+              "GHV-Monitor-arm64.dmg" \
               "dist/GHV Monitor.app/" || \
             (echo "create-dmg failed, falling back to hdiutil..." && \
-             hdiutil create -srcfolder "dist/GHV Monitor.app" -volname "GHV Monitor" -fs HFS+ -format UDZO "GHV-Monitor.dmg")
+             hdiutil create -srcfolder "dist/GHV Monitor.app" -volname "GHV Monitor" -fs HFS+ -format UDZO "GHV-Monitor-arm64.dmg")
           fi
-      - name: Upload macOS DMG
+      - name: Upload macOS DMG (Apple Silicon)
         uses: actions/upload-artifact@v4
         with:
-          name: GHV-Monitor-macOS
-          path: GHV-Monitor.dmg
+          name: GHV-Monitor-macOS-arm64
+          path: GHV-Monitor-arm64.dmg
+
+  build-macos-intel:
+    runs-on: macos-13
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          pip install -r requirements.txt
+      - name: Build app bundle
+        env:
+          GHV_TARGET_ARCH: x86_64
+        run: pyinstaller ghv-monitor.spec --clean
+      - name: Debug - check dist folder
+        run: ls -la dist/
+      - name: Verify architecture is x86_64
+        run: |
+          BIN="dist/GHV Monitor.app/Contents/MacOS/GHV-Monitor"
+          file "$BIN"
+          if ! file "$BIN" | grep -q "x86_64"; then
+            echo "ERROR: built binary is not x86_64!"
+            exit 1
+          fi
+      - name: Ad-hoc sign app
+        run: |
+          if [ -d "dist/GHV Monitor.app" ]; then
+            codesign --force --deep --sign - "dist/GHV Monitor.app"
+          else
+            echo "ERROR: App bundle not found!"
+            ls -R dist/
+            exit 1
+          fi
+      - name: Install create-dmg
+        run: brew install create-dmg
+      - name: Create DMG
+        run: |
+          if [ -d "dist/GHV Monitor.app" ]; then
+            create-dmg \
+              --volname "GHV Monitor" \
+              --window-size 800 400 \
+              --icon-size 100 \
+              --app-drop-link 600 185 \
+              "GHV-Monitor-intel.dmg" \
+              "dist/GHV Monitor.app/" || \
+            (echo "create-dmg failed, falling back to hdiutil..." && \
+             hdiutil create -srcfolder "dist/GHV Monitor.app" -volname "GHV Monitor" -fs HFS+ -format UDZO "GHV-Monitor-intel.dmg")
+          fi
+      - name: Upload macOS DMG (Intel)
+        uses: actions/upload-artifact@v4
+        with:
+          name: GHV-Monitor-macOS-intel
+          path: GHV-Monitor-intel.dmg
 
   build-linux:
     runs-on: ubuntu-latest
