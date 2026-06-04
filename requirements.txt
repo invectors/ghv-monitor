@@ -3,3 +3,6 @@ Pillow==10.2.0
 requests==2.31.0
 schedule==1.2.1
 pynput==1.7.6
+# macOS-only: native thread-safe idle detection via Quartz (replaces pynput
+# listeners on macOS, which crash when run off the main thread).
+pyobjc-framework-Quartz==10.3.1 ; sys_platform == 'darwin'
