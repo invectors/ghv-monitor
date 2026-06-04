@@ -18,13 +18,35 @@ from PIL import Image
 from io import BytesIO
 import base64
 
-# Idle detection (pynput) — optional, gracefully degrades if not available
+
+# Idle detection.
+# On macOS, pynput's keyboard listener calls main-thread-only Carbon
+# (TSM) APIs from its background thread, which hard-crashes with
+# EXC_BAD_INSTRUCTION (SIGILL). So on macOS we use the native, thread-safe
+# Quartz idle query instead and never start pynput listeners.
+IS_MACOS = sys.platform == 'darwin'
+MACOS_IDLE_AVAILABLE = False
+if IS_MACOS:
+    try:
+        from Quartz import (
+            CGEventSourceSecondsSinceLastEventType,
+            kCGEventSourceStateHIDSystemState,
+            kCGAnyInputEventType,
+        )
+        MACOS_IDLE_AVAILABLE = True
+    except Exception:
+        print("[Idle] Quartz not available — macOS idle detection disabled")
+
+# pynput is used for idle detection on Windows/Linux only.
 try:
     from pynput import keyboard, mouse
     PYNPUT_AVAILABLE = True
 except ImportError:
     PYNPUT_AVAILABLE = False
     print("[Idle] pynput not available — idle detection disabled")
+
+# True if *some* idle backend is usable on this platform.
+IDLE_AVAILABLE = MACOS_IDLE_AVAILABLE or (PYNPUT_AVAILABLE and not IS_MACOS)
 
 # Configuration
 CONFIG = {
@@ -41,9 +63,15 @@ CONFIG = {
 }
 
 class IdleDetector:
-    """Cross-platform OS idle detector using pynput input listeners.
+    """Cross-platform OS idle detector.
 
-    Tracks the wall-clock time of the most recent keyboard or mouse event.
+    On macOS: uses the native, thread-safe Quartz HID idle query
+    (CGEventSourceSecondsSinceLastEventType) — no input listeners, so it
+    is safe to call from the scheduler thread and does not crash.
+
+    On Windows/Linux: uses pynput keyboard/mouse listeners to track the
+    time of the most recent input event.
+
     `get_idle_seconds()` returns how long it's been since any input.
     """
     def __init__(self):
@@ -55,7 +83,16 @@ class IdleDetector:
         self.last_input_time = time.time()
 
     def start(self):
-        if self._started or not PYNPUT_AVAILABLE:
+        if self._started:
+            return
+        # macOS: nothing to start — idle time is queried on demand.
+        if IS_MACOS:
+            if MACOS_IDLE_AVAILABLE:
+                self._started = True
+                print("[Idle] Detector started (macOS native Quartz)")
+            return
+        # Windows/Linux: start pynput listeners on background threads.
+        if not PYNPUT_AVAILABLE:
             return
         try:
             kb_listener = keyboard.Listener(on_press=self._on_activity)
@@ -70,7 +107,7 @@ class IdleDetector:
             ms_listener.start()
             self._listeners = [kb_listener, ms_listener]
             self._started = True
-            print("[Idle] Detector started")
+            print("[Idle] Detector started (pynput)")
         except Exception as e:
             # Most common on Wayland or restricted/headless systems
             print(f"[Idle] Failed to start listeners: {e}")
@@ -78,6 +115,16 @@ class IdleDetector:
     def get_idle_seconds(self):
         if not self._started:
             return 0.0
+        if IS_MACOS:
+            # System-wide seconds since the last HID input event.
+            # Safe to call from any thread.
+            try:
+                return float(CGEventSourceSecondsSinceLastEventType(
+                    kCGEventSourceStateHIDSystemState,
+                    kCGAnyInputEventType,
+                ))
+            except Exception:
+                return 0.0
         return time.time() - self.last_input_time
 
 class ScreenshotMonitor:
@@ -449,7 +496,7 @@ class ScreenshotMonitor:
         """
         if not self.is_monitoring or self.is_paused:
             return
-        if not PYNPUT_AVAILABLE:
+        if not IDLE_AVAILABLE:
             return
 
         idle_seconds = self.idle_detector.get_idle_seconds()
