@@ -57,6 +57,13 @@ CONFIG = {
     'STATUS_CHECK_SECONDS': 30,
     'IDLE_CHECK_INTERVAL_SECONDS': 15,           # how often to poll OS for idle time
     'IDLE_DETECTION_THRESHOLD_SECONDS': 300,     # 5 min of no input = idle
+    # Safety ceiling: if the idle detector ever reports more idle time than this,
+    # we treat it as UNTRUSTWORTHY (e.g. a dead input listener that froze
+    # last_input_time on Windows after sleep/wake or an RDP reconnect) rather
+    # than a real idle user. Above this we reset to not-idle and keep capturing.
+    # 4h comfortably exceeds any real continuous idle within a monitored shift
+    # (idle is checked every 15s; a genuinely-away user would be clocked out).
+    'IDLE_SANITY_CEILING_SECONDS': 4 * 3600,
     'MAX_RETRY_ATTEMPTS': 3,
     'IMAGE_QUALITY': 85,
     'MAX_IMAGE_WIDTH': 1920,
@@ -112,6 +119,35 @@ class IdleDetector:
             # Most common on Wayland or restricted/headless systems
             print(f"[Idle] Failed to start listeners: {e}")
 
+    def ensure_alive(self):
+        """Re-arm input listeners if they've died (Windows/Linux only).
+
+        pynput listeners run on background threads that can silently die after
+        OS sleep/wake, RDP reconnects, or fast user switching on Windows. When
+        that happens last_input_time freezes and idle detection breaks. This
+        checks the listener threads and restarts them if any are dead.
+        No-op on macOS (no listeners) and where pynput is unavailable.
+        """
+        if IS_MACOS or not PYNPUT_AVAILABLE:
+            return
+        alive = bool(self._listeners) and all(
+            getattr(l, 'running', False) and getattr(l, 'is_alive', lambda: False)()
+            for l in self._listeners
+        )
+        if alive:
+            return
+        print("[Idle] Listener(s) not alive — restarting.")
+        # Stop any stragglers, then re-arm from a clean slate.
+        for l in self._listeners:
+            try:
+                l.stop()
+            except Exception:
+                pass
+        self._listeners = []
+        self._started = False
+        self.last_input_time = time.time()
+        self.start()
+
     def get_idle_seconds(self):
         if not self._started:
             return 0.0
@@ -150,6 +186,7 @@ class ScreenshotMonitor:
         # Idle detection state
         self.idle_detector = IdleDetector()
         self.is_idle = False  # True between sending 'start' and 'end' events
+        self.last_capture_success = None  # unix ts of last successful capture (watchdog)
         
         # Load saved data
         self.load_config()
@@ -501,6 +538,28 @@ class ScreenshotMonitor:
 
         idle_seconds = self.idle_detector.get_idle_seconds()
         threshold = CONFIG['IDLE_DETECTION_THRESHOLD_SECONDS']
+        ceiling = CONFIG['IDLE_SANITY_CEILING_SECONDS']
+
+        # ── SAFETY: untrustworthy idle detector ──
+        # If reported idle exceeds the sanity ceiling, the input listener has
+        # almost certainly frozen (dead pynput hook after sleep/wake / RDP on
+        # Windows), which would otherwise latch is_idle=True forever and stop
+        # all captures silently. Treat it as not-idle, reset the detector's
+        # clock so it can recover, and try to restart listeners.
+        if idle_seconds >= ceiling:
+            print(f"[Idle] Reported idle {int(idle_seconds)}s exceeds ceiling "
+                  f"{ceiling}s — detector likely frozen. Forcing not-idle + recovery.")
+            if self.is_idle:
+                self.is_idle = False
+                self.send_idle_event('end', datetime.now(timezone.utc))
+            # Reset the baseline so get_idle_seconds() returns ~0 again.
+            self.idle_detector.last_input_time = time.time()
+            # Best-effort: re-arm listeners if they died (no-op on macOS).
+            try:
+                self.idle_detector.ensure_alive()
+            except Exception as e:
+                print(f"[Idle] ensure_alive failed: {e}")
+            return
 
         if idle_seconds >= threshold and not self.is_idle:
             # User became idle. The actual start was `idle_seconds` ago.
@@ -515,18 +574,57 @@ class ScreenshotMonitor:
             self.is_idle = False
             self.send_idle_event('end', datetime.now(timezone.utc))
     
+    def capture_watchdog(self):
+        """Safety net: if captures have silently stopped while we still think
+        we're monitoring, force one and self-heal. Catches frozen idle state,
+        a missed schedule, or any other stall that doesn't raise."""
+        if not self.is_monitoring or self.is_paused:
+            return
+        interval = CONFIG['CAPTURE_INTERVAL_MINUTES'] * 60
+        # Allow 2x the interval before we consider it stalled.
+        max_gap = interval * 2 + 30
+        last = self.last_capture_success or 0
+        gap = time.time() - last
+        if gap < max_gap:
+            return
+        print(f"[Watchdog] No successful capture in {int(gap)}s "
+              f"(limit {max_gap}s) — forcing recovery.")
+        # If idle state is stuck, clear it so the forced capture goes through.
+        try:
+            idle_now = self.idle_detector.get_idle_seconds()
+            if self.is_idle and idle_now >= CONFIG['IDLE_SANITY_CEILING_SECONDS']:
+                self.is_idle = False
+                self.idle_detector.last_input_time = time.time()
+                self.idle_detector.ensure_alive()
+        except Exception as e:
+            print(f"[Watchdog] idle recovery failed: {e}")
+        # Force a capture attempt now.
+        self.capture_and_upload()
+
     def capture_and_upload(self):
         if not self.is_monitoring or self.is_paused:
             print("[Capture] Skipping (not monitoring or paused)")
             return
         if self.is_idle:
-            print("[Capture] Skipping (user is idle)")
-            return
+            # SAFETY: only honor the idle-skip if the idle reading is still
+            # plausible. If the detector reports an implausibly long idle, it
+            # has likely frozen (dead listener) — don't let that silently stop
+            # captures; proceed to capture and let check_idle recover state.
+            try:
+                idle_now = self.idle_detector.get_idle_seconds()
+            except Exception:
+                idle_now = 0
+            if idle_now < CONFIG['IDLE_SANITY_CEILING_SECONDS']:
+                print("[Capture] Skipping (user is idle)")
+                return
+            print(f"[Capture] is_idle set but idle reading {int(idle_now)}s is "
+                  f"implausible — capturing anyway (detector may be frozen).")
         try:
             image_bytes = self.capture_screenshot()
             result = self.upload_screenshot(image_bytes)
             
             if result.get('success'):
+                self.last_capture_success = time.time()
                 self.process_queue()
                 if self.on_screenshot_captured:
                     self.on_screenshot_captured('success')
@@ -585,6 +683,11 @@ class ScreenshotMonitor:
 
         schedule.every(CONFIG['CAPTURE_INTERVAL_MINUTES']).minutes.do(self.capture_and_upload)
         threading.Timer(5.0, self.capture_and_upload).start()
+        # Watchdog: catch the case where captures silently stop while the app
+        # still believes it's monitoring. Runs every minute; forces a capture
+        # if none has succeeded in 2× the capture interval.
+        self.last_capture_success = time.time()
+        schedule.every(1).minutes.do(self.capture_watchdog)
         
         if self.on_status_changed:
             self.on_status_changed()
