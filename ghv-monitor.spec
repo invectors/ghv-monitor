@@ -49,11 +49,17 @@ exe = EXE(
     argv_emulation=True,
     target_arch=TARGET_ARCH,
     codesign_identity=None,
-    entitlements_file=None,
+    entitlements_file='entitlements.plist' if os.path.exists('entitlements.plist') else None,
 )
 
 app = BUNDLE(
     exe,
     name='GHV Monitor.app',
     bundle_identifier='net.gohirevirtual.monitor',
+    entitlements_file='entitlements.plist' if os.path.exists('entitlements.plist') else None,
+    info_plist={
+        'NSScreenCaptureDescription': 'GHV Monitor needs screen recording to capture screenshots for time tracking.',
+        'NSHighResolutionCapable': True,
+        'LSUIElement': False,
+    },
 )
