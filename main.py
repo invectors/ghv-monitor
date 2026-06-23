@@ -331,52 +331,22 @@ class ScreenshotMonitor:
     def capture_screenshot(self):
     try:
         print("[Screenshot] Capturing desktop...")
-        import platform
-        if platform.system() == 'Darwin':
-            # Use macOS built-in screencapture — works on all macOS versions
-            # including Sonoma, Sequoia, and Tahoe
-            import subprocess
-            import tempfile
-            with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
-                tmp_path = tmp.name
-            subprocess.run([
-                'screencapture',
-                '-x',        # no sound
-                '-t', 'jpg', # jpeg format
-                tmp_path
-            ], check=True, capture_output=True)
-            with open(tmp_path, 'rb') as f:
-                img_bytes_raw = f.read()
-            os.unlink(tmp_path)
+        with mss.mss() as sct:
+            monitor = sct.monitors[0]
+            screenshot = sct.grab(monitor)
+            img = Image.frombytes('RGB', screenshot.size, screenshot.rgb)
 
-            # Resize if needed
-            from PIL import Image
-            from io import BytesIO
-            img = Image.open(BytesIO(img_bytes_raw))
             if img.width > CONFIG['MAX_IMAGE_WIDTH']:
                 ratio = CONFIG['MAX_IMAGE_WIDTH'] / img.width
                 new_height = int(img.height * ratio)
                 img = img.resize((CONFIG['MAX_IMAGE_WIDTH'], new_height), Image.Resampling.LANCZOS)
+
             buffer = BytesIO()
             img.save(buffer, format='JPEG', quality=CONFIG['IMAGE_QUALITY'])
             img_bytes = buffer.getvalue()
-        else:
-            # Windows / Linux — keep using mss
-            with mss.mss() as sct:
-                monitor_index = 1 if len(sct.monitors) > 1 else 0
-                monitor = sct.monitors[monitor_index]
-                screenshot = sct.grab(monitor)
-                img = Image.frombytes('RGB', screenshot.size, screenshot.rgb)
-                if img.width > CONFIG['MAX_IMAGE_WIDTH']:
-                    ratio = CONFIG['MAX_IMAGE_WIDTH'] / img.width
-                    new_height = int(img.height * ratio)
-                    img = img.resize((CONFIG['MAX_IMAGE_WIDTH'], new_height), Image.Resampling.LANCZOS)
-                buffer = BytesIO()
-                img.save(buffer, format='JPEG', quality=CONFIG['IMAGE_QUALITY'])
-                img_bytes = buffer.getvalue()
 
-        print(f"[Screenshot] Captured ({len(img_bytes)} bytes)")
-        return img_bytes
+            print(f"[Screenshot] Captured ({len(img_bytes)} bytes)")
+            return img_bytes
 
     except Exception as e:
         print(f"[Screenshot] Error: {e}")
