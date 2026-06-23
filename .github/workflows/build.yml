@@ -97,7 +97,10 @@ jobs:
       - name: Ad-hoc sign app
         run: |
           if [ -d "dist/GHV Monitor.app" ]; then
-            codesign --force --deep --sign - "dist/GHV Monitor.app"
+            codesign --force --deep --sign - \
+              --entitlements entitlements.plist \
+              --options runtime \
+              "dist/GHV Monitor.app"
           else
             echo "ERROR: App bundle not found!"
             ls -R dist/
