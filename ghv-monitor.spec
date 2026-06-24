@@ -18,7 +18,6 @@ a = Analysis(
         'schedule',
         'Quartz',
         'main',
-        'gui',
     ],
     hookspath=[],
     hooksconfig={},
