@@ -329,15 +329,12 @@ class ScreenshotMonitor:
             print(f"[Queue] Error saving queue: {e}")
     
     def capture_screenshot(self):
-    try:
-        print("[Screenshot] Capturing desktop...")
-        with mss.mss() as sct:
-            # monitors[0] = combined virtual monitor (blank on macOS Sonoma+)
-            # monitors[1] = primary display (correct on all platforms)
-            monitor_index = 1 if len(sct.monitors) > 1 else 0
-            monitor = sct.monitors[monitor_index]
-            screenshot = sct.grab(monitor)
-            img = Image.frombytes('RGB', screenshot.size, screenshot.rgb)
+        try:
+            print("[Screenshot] Capturing desktop...")
+            with mss.mss() as sct:
+                monitor = sct.monitors[0]
+                screenshot = sct.grab(monitor)
+                img = Image.frombytes('RGB', screenshot.size, screenshot.rgb)
                 
                 if img.width > CONFIG['MAX_IMAGE_WIDTH']:
                     ratio = CONFIG['MAX_IMAGE_WIDTH'] / img.width
