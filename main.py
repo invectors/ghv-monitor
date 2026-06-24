@@ -329,41 +329,8 @@ class ScreenshotMonitor:
             print(f"[Queue] Error saving queue: {e}")
     
     def capture_screenshot(self):
-        try:
-            print("[Screenshot] Capturing desktop...")
-            if IS_MACOS:
-                import subprocess
-                import tempfile
-                tmp_path = tempfile.mktemp(suffix='.jpg')
-                subprocess.run(
-                    ['screencapture', '-x', '-t', 'jpg', tmp_path],
-                    check=True
-                )
-                with open(tmp_path, 'rb') as f:
-                    raw = f.read()
-                os.unlink(tmp_path)
-                img = Image.open(BytesIO(raw)).convert('RGB')
-            else:
-                with mss.mss() as sct:
-                    monitor_index = 1 if len(sct.monitors) > 1 else 0
-                    monitor = sct.monitors[monitor_index]
-                    screenshot = sct.grab(monitor)
-                    img = Image.frombytes('RGB', screenshot.size, screenshot.rgb)
-
-            if img.width > CONFIG['MAX_IMAGE_WIDTH']:
-                ratio = CONFIG['MAX_IMAGE_WIDTH'] / img.width
-                new_height = int(img.height * ratio)
-                img = img.resize((CONFIG['MAX_IMAGE_WIDTH'], new_height), Image.Resampling.LANCZOS)
-
-            buffer = BytesIO()
-            img.save(buffer, format='JPEG', quality=CONFIG['IMAGE_QUALITY'])
-            img_bytes = buffer.getvalue()
-            print(f"[Screenshot] Captured ({len(img_bytes)} bytes)")
-            return img_bytes
-
-        except Exception as e:
-            print(f"[Screenshot] Error: {e}")
-            raise
+    try:
+        print("[Screenshot] Capturing desktop...")
         import platform
         if platform.system() == 'Darwin':
             import subprocess
