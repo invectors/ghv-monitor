@@ -9,7 +9,7 @@ block_cipher = None
 TARGET_ARCH = os.environ.get('GHV_TARGET_ARCH') or None
 
 a = Analysis(
-    ['app.py'],
+    ['app.py', 'main.py', 'gui.py'],
     pathex=[],
     binaries=[],
     datas=[],
