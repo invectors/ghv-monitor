@@ -17,7 +17,6 @@ a = Analysis(
         'PIL._tkinter_finder',
         'schedule',
         'Quartz',
-        'main',
     ],
     hookspath=[],
     hooksconfig={},
