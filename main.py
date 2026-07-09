@@ -187,6 +187,7 @@ class ScreenshotMonitor:
         self.idle_detector = IdleDetector()
         self.is_idle = False  # True between sending 'start' and 'end' events
         self.last_capture_success = None  # unix ts of last successful capture (watchdog)
+        self._capture_job = None  # schedule job reference for dynamic rescheduling
         
         # Load saved data
         self.load_config()
@@ -470,6 +471,15 @@ class ScreenshotMonitor:
 
             print(f"[Sync] Status: active={status.get('active')}, clocked_in={status.get('clocked_in')}, on_lunch={status.get('on_lunch')}")
 
+            # ── Apply server-side capture interval override ───────────────────
+            # The server returns capture_interval_minutes based on per-user
+            # screenshot_settings overrides (or the global default).
+            # Apply it live so the per-user override actually takes effect.
+            srv_interval = status.get('capture_interval_minutes')
+            if isinstance(srv_interval, (int, float)) and srv_interval > 0:
+                self._reschedule_capture(int(srv_interval))
+            # ─────────────────────────────────────────────────────────────────
+
             if status.get('active') and status.get('clocked_in') and not status.get('on_lunch'):
                 if not self.is_monitoring:
                     print("[Sync] Starting monitoring (clocked in)")
@@ -681,7 +691,7 @@ class ScreenshotMonitor:
         self.idle_detector.start()
         schedule.every(CONFIG['IDLE_CHECK_INTERVAL_SECONDS']).seconds.do(self.check_idle)
 
-        schedule.every(CONFIG['CAPTURE_INTERVAL_MINUTES']).minutes.do(self.capture_and_upload)
+        self._capture_job = schedule.every(CONFIG['CAPTURE_INTERVAL_MINUTES']).minutes.do(self.capture_and_upload)
         threading.Timer(5.0, self.capture_and_upload).start()
         # Watchdog: catch the case where captures silently stop while the app
         # still believes it's monitoring. Runs every minute; forces a capture
@@ -694,6 +704,32 @@ class ScreenshotMonitor:
         
         print("[Monitor] Started")
     
+    def _reschedule_capture(self, new_interval_minutes):
+        """Update the capture interval live without restarting the app.
+        Called by sync_with_tracker when the server returns a different
+        capture_interval_minutes than the current CONFIG value.
+        """
+        if not self.is_monitoring:
+            # Will pick up the new CONFIG value when start_monitoring() is called.
+            CONFIG['CAPTURE_INTERVAL_MINUTES'] = new_interval_minutes
+            return
+
+        if new_interval_minutes == CONFIG['CAPTURE_INTERVAL_MINUTES']:
+            return  # no change
+
+        print(f"[Monitor] Capture interval changing: "
+              f"{CONFIG['CAPTURE_INTERVAL_MINUTES']}m → {new_interval_minutes}m")
+
+        CONFIG['CAPTURE_INTERVAL_MINUTES'] = new_interval_minutes
+
+        # Cancel the old job and schedule a new one.
+        if self._capture_job is not None:
+            schedule.cancel_job(self._capture_job)
+            self._capture_job = None
+
+        self._capture_job = schedule.every(new_interval_minutes).minutes.do(self.capture_and_upload)
+        print(f"[Monitor] Rescheduled capture every {new_interval_minutes}m")
+
     def stop_monitoring(self):
         if not self.is_monitoring:
             return
@@ -707,6 +743,7 @@ class ScreenshotMonitor:
 
         self.is_monitoring = False
         self.is_paused = False
+        self._capture_job = None
         schedule.clear()
         
         if self.on_status_changed:
