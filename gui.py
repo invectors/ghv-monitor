@@ -43,10 +43,69 @@ class MonitorGUI:
 
         monitor.on_status_changed    = self.update_status
         monitor.on_screenshot_captured = self.on_screenshot
+        monitor.on_update_required   = self._on_update_required
 
         self._show_login()
         threading.Thread(target=monitor.run_scheduler, daemon=True).start()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _on_update_required(self, min_version: str):
+        """Called from the monitor thread — marshal to the UI thread."""
+        self.root.after(0, lambda: self._show_force_update(min_version))
+
+    def _show_force_update(self, min_version: str):
+        """Blocking overlay that prevents use until the user updates."""
+        # Only show once — avoid stacking on every 30-second sync
+        if hasattr(self, '_update_dialog') and self._update_dialog.winfo_exists():
+            return
+
+        from version import VERSION
+        import webbrowser
+
+        dlg = ctk.CTkToplevel(self.root)
+        dlg.title("Update Required")
+        dlg.geometry("340x280")
+        dlg.resizable(False, False)
+        dlg.configure(fg_color=BG)
+        dlg.grab_set()          # block all other interaction
+        dlg.protocol("WM_DELETE_WINDOW", lambda: None)  # prevent close
+
+        # Centre over parent
+        self.root.update_idletasks()
+        px = self.root.winfo_x(); py = self.root.winfo_y()
+        dlg.geometry(f"340x280+{px+20}+{py+160}")
+        self._update_dialog = dlg
+
+        # Content
+        ctk.CTkLabel(dlg, text="🔄", font=self._font(36)).pack(pady=(28, 0))
+        ctk.CTkLabel(dlg, text="Update Required",
+                     font=self._font(16, "bold"), text_color=TEXT).pack(pady=(6, 0))
+        ctk.CTkLabel(dlg,
+                     text=f"Version {min_version} is required.\nYou are running {VERSION}.",
+                     font=self._font(12), text_color=TEXT_SUB,
+                     justify="center").pack(pady=(8, 0))
+        ctk.CTkLabel(dlg,
+                     text="Please install the latest build\nto continue using GHV Monitor.",
+                     font=self._font(11), text_color=TEXT_MUTED,
+                     justify="center").pack(pady=(4, 0))
+
+        def _open_download():
+            webbrowser.open(
+                "https://github.com/invectors/ghv-monitor/releases/latest")
+
+        ctk.CTkButton(dlg, text="⬇  Download Update",
+                      height=44, corner_radius=10,
+                      fg_color=GREEN, hover_color=GREEN_DIM,
+                      font=self._font(13, "bold"), text_color=TEXT,
+                      command=_open_download).pack(
+                          fill="x", padx=28, pady=(18, 0))
+        ctk.CTkButton(dlg, text="Quit App",
+                      height=36, corner_radius=10,
+                      fg_color="transparent", border_color=BORDER, border_width=1,
+                      hover_color="#1a1a1a", text_color=TEXT_MUTED,
+                      font=self._font(12),
+                      command=self._on_close).pack(
+                          fill="x", padx=28, pady=(8, 0))
 
     # ─────────────────────────────────────────────────────────────────────────
     # HELPERS
