@@ -133,14 +133,6 @@ class MonitorGUI:
 
         self._pw_entry.bind("<Return>", lambda e: self._do_login())
 
-        # Remember me
-        self._remember = ctk.BooleanVar(value=True)
-        ctk.CTkCheckBox(
-            form, text="Remember me", variable=self._remember,
-            font=self._font(12), text_color=TEXT_SUB,
-            fg_color=GREEN, hover_color=GREEN_DIM,
-            border_color=BORDER, checkmark_color=TEXT).pack(anchor="w", pady=(14, 0))
-
         # Login button
         self._login_btn = ctk.CTkButton(
             form, text="Login", height=48, corner_radius=10,
@@ -213,7 +205,7 @@ class MonitorGUI:
         card.pack(fill="x", padx=20, pady=(16, 0))
 
         inner = ctk.CTkFrame(card, fg_color="transparent")
-        inner.pack(padx=20, pady=20, fill="x")
+        inner.pack(padx=20, pady=(18, 12), fill="x")
 
         # Left: circular canvas indicator
         left = ctk.CTkFrame(inner, fg_color="transparent", width=88)
@@ -225,7 +217,7 @@ class MonitorGUI:
 
         # Right: text block
         right = ctk.CTkFrame(inner, fg_color="transparent")
-        right.pack(side="left", fill="both", expand=True, padx=(16, 0))
+        right.pack(side="left", fill="x", expand=True, padx=(16, 0))
 
         self._status_title = ctk.CTkLabel(
             right, text="Not Active", font=self._font(15, "bold"),
@@ -272,7 +264,7 @@ class MonitorGUI:
 
         # ── How it works ──────────────────────────────────────────────────
         hw = ctk.CTkFrame(self.root, fg_color=BG_CARD, corner_radius=14)
-        hw.pack(fill="x", padx=20, pady=(12, 0))
+        hw.pack(fill="x", padx=20, pady=(12, 16))
 
         ctk.CTkLabel(hw, text="How it works", font=self._font(12, "bold"),
                      text_color=TEXT).pack(anchor="w", padx=18, pady=(16, 8))
@@ -311,14 +303,13 @@ class MonitorGUI:
         # Background ring
         c.create_oval(cx-r_out, cy-r_out, cx+r_out, cy+r_out,
                       outline="#2a2a2a", width=8)
-        # Coloured arc (270° sweep for "full" look)
-        # tkinter arc: start=90 (top), extent=270
+        # Full coloured ring (360°)
         c.create_arc(cx-r_out, cy-r_out, cx+r_out, cy+r_out,
-                     start=90, extent=-270,
+                     start=90, extent=-360,
                      outline=color, width=8, style="arc")
-        # Centre icon — monitor symbol using text
-        c.create_text(cx, cy, text="⊡", fill=color,
-                      font=("Segoe UI Symbol", 18))
+        # Centre play icon
+        c.create_text(cx, cy, text="▶", fill=color,
+                      font=("Segoe UI Symbol", 16))
 
     # ─────────────────────────────────────────────────────────────────────────
     # STATUS UPDATE
