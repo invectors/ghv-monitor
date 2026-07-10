@@ -1,211 +1,379 @@
 #!/usr/bin/env python3
 """
-GHV Monitor - GUI
-Regular windowed app, no system tray
+GHV Monitor — GUI
+Dark theme redesign using customtkinter.
 """
 
 import tkinter as tk
-from tkinter import ttk, messagebox
+import customtkinter as ctk
 import threading
-from main import monitor
+import math
+from main import monitor, CONFIG
+
+# ── Palette ───────────────────────────────────────────────────────────────────
+BG          = "#0d0d0d"
+BG_CARD     = "#181818"
+BG_INPUT    = "#111111"
+BG_HEADER   = "#071407"   # very dark green for the logo zone
+GREEN       = "#05ac13"
+GREEN_DIM   = "#037d0e"
+GREEN_GLOW  = "#19c728"
+TEXT        = "#ffffff"
+TEXT_SUB    = "#aaaaaa"
+TEXT_MUTED  = "#555555"
+BORDER      = "#2a2a2a"
+
+ctk.set_appearance_mode("dark")
+ctk.set_default_color_theme("green")
+
 
 class MonitorGUI:
     def __init__(self):
-        self.root = tk.Tk()
+        self.root = ctk.CTk()
         self.root.title("GHV Monitor")
-        self.root.geometry("400x450")
+        self.root.geometry("380x600")
         self.root.resizable(False, False)
-        
-        monitor.on_status_changed = self.update_status
+        self.root.configure(fg_color=BG)
+
+        # Centre on screen
+        self.root.update_idletasks()
+        x = (self.root.winfo_screenwidth()  - 380) // 2
+        y = (self.root.winfo_screenheight() - 600) // 2
+        self.root.geometry(f"380x600+{x}+{y}")
+
+        monitor.on_status_changed    = self.update_status
         monitor.on_screenshot_captured = self.on_screenshot
-        
-        # Always show login screen first - don't auto-login with saved credentials
-        # This avoids "Connection Failed" loops with stale saved credentials
-        self.show_login_screen()
-        
+
+        self._show_login()
         threading.Thread(target=monitor.run_scheduler, daemon=True).start()
-        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
-    
-    def on_close(self):
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # HELPERS
+    # ─────────────────────────────────────────────────────────────────────────
+    def _clear(self):
+        for w in self.root.winfo_children():
+            w.destroy()
+
+    def _on_close(self):
         monitor.stop_monitoring()
         self.root.destroy()
-    
-    def show_login_screen(self):
-        self.clear_window()
-        
-        logo_frame = tk.Frame(self.root, bg='#3b82f6', height=120)
-        logo_frame.pack(fill=tk.X)
-        logo_frame.pack_propagate(False)
-        
-        tk.Label(logo_frame, text="GHV", font=("Arial", 32, "bold"), 
-                bg='#3b82f6', fg='white').pack(pady=20)
-        tk.Label(logo_frame, text="Monitor", font=("Arial", 16), 
-                bg='#3b82f6', fg='white').pack()
-        
-        form_frame = tk.Frame(self.root, padx=40, pady=40)
-        form_frame.pack(fill=tk.BOTH, expand=True)
-        
-        # Username - pre-fill ONLY username, not password
-        tk.Label(form_frame, text="Username", font=("Arial", 10)).pack(anchor=tk.W)
-        self.username_entry = tk.Entry(form_frame, font=("Arial", 12))
-        self.username_entry.pack(fill=tk.X, pady=(5, 15))
-        
-        # Only pre-fill username if we have saved credentials
-        if monitor.credentials and monitor.credentials.get('username'):
-            self.username_entry.insert(0, monitor.credentials['username'])
-        self.username_entry.focus()
-        
-        # Password - NEVER pre-fill for security
-        tk.Label(form_frame, text="Password", font=("Arial", 10)).pack(anchor=tk.W)
-        self.password_entry = tk.Entry(form_frame, font=("Arial", 12), show="*")
-        self.password_entry.pack(fill=tk.X, pady=(5, 20))
-        
-        self.password_entry.bind('<Return>', lambda e: self.do_login())
-        
-        self.login_btn = tk.Button(form_frame, text="Login", font=("Arial", 12, "bold"),
-                                   bg='#3b82f6', fg='white', cursor='hand2',
-                                   command=self.do_login)
-        self.login_btn.pack(fill=tk.X, ipady=10)
-        
-        tk.Label(form_frame, text="Enter your GoHireVirtual hub credentials",
-                font=("Arial", 9), fg='#6b7280').pack(pady=(20, 0))
-    
-    def do_login(self):
-        username = self.username_entry.get().strip()
-        password = self.password_entry.get()
-        
+
+    def _font(self, size, weight="normal"):
+        return ctk.CTkFont(family="Poppins" if self._has_poppins() else "Segoe UI",
+                           size=size, weight=weight)
+
+    _poppins_checked = None
+    def _has_poppins(self):
+        if MonitorGUI._poppins_checked is None:
+            try:
+                tk.font.families(self.root)
+                MonitorGUI._poppins_checked = "Poppins" in tk.font.families(self.root)
+            except Exception:
+                MonitorGUI._poppins_checked = False
+        return MonitorGUI._poppins_checked
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # LOGIN SCREEN
+    # ─────────────────────────────────────────────────────────────────────────
+    def _show_login(self):
+        self._clear()
+        self.root.geometry("380x600")
+
+        # ── Logo zone ─────────────────────────────────────────────────────
+        logo = ctk.CTkFrame(self.root, height=190, fg_color=BG_HEADER,
+                            corner_radius=0)
+        logo.pack(fill="x")
+        logo.pack_propagate(False)
+
+        ctk.CTkLabel(logo, text="GHV", font=self._font(44, "bold"),
+                     text_color=TEXT).pack(pady=(28, 0))
+        ctk.CTkLabel(logo, text="Monitor", font=self._font(18),
+                     text_color=GREEN).pack()
+        ctk.CTkLabel(logo, text="Employee Login", font=self._font(12),
+                     text_color=TEXT_SUB).pack(pady=(6, 0))
+
+        # ── Form zone ─────────────────────────────────────────────────────
+        form = ctk.CTkFrame(self.root, fg_color=BG, corner_radius=0)
+        form.pack(fill="both", expand=True, padx=32)
+
+        ctk.CTkLabel(form, text="Username", font=self._font(11, "bold"),
+                     text_color=TEXT_SUB, anchor="w").pack(fill="x", pady=(24, 4))
+        self._user_entry = ctk.CTkEntry(
+            form, placeholder_text="Enter your username",
+            height=44, corner_radius=8,
+            fg_color=BG_INPUT, border_color=BORDER, border_width=1,
+            text_color=TEXT, placeholder_text_color=TEXT_MUTED,
+            font=self._font(13))
+        self._user_entry.pack(fill="x")
+
+        if monitor.credentials and monitor.credentials.get("username"):
+            self._user_entry.insert(0, monitor.credentials["username"])
+
+        ctk.CTkLabel(form, text="Password", font=self._font(11, "bold"),
+                     text_color=TEXT_SUB, anchor="w").pack(fill="x", pady=(14, 4))
+
+        # Password row with show/hide toggle
+        pw_row = ctk.CTkFrame(form, fg_color="transparent")
+        pw_row.pack(fill="x")
+        self._pw_entry = ctk.CTkEntry(
+            pw_row, placeholder_text="Enter your password",
+            height=44, corner_radius=8, show="•",
+            fg_color=BG_INPUT, border_color=BORDER, border_width=1,
+            text_color=TEXT, placeholder_text_color=TEXT_MUTED,
+            font=self._font(13))
+        self._pw_entry.pack(side="left", fill="x", expand=True)
+        self._pw_visible = False
+        self._eye_btn = ctk.CTkButton(
+            pw_row, text="👁", width=40, height=44,
+            fg_color=BG_INPUT, hover_color=BG_CARD, corner_radius=8,
+            text_color=TEXT_SUB, font=self._font(14),
+            command=self._toggle_pw)
+        self._eye_btn.pack(side="left", padx=(4, 0))
+
+        self._pw_entry.bind("<Return>", lambda e: self._do_login())
+
+        # Remember me
+        self._remember = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(
+            form, text="Remember me", variable=self._remember,
+            font=self._font(12), text_color=TEXT_SUB,
+            fg_color=GREEN, hover_color=GREEN_DIM,
+            border_color=BORDER, checkmark_color=TEXT).pack(anchor="w", pady=(14, 0))
+
+        # Login button
+        self._login_btn = ctk.CTkButton(
+            form, text="Login", height=48, corner_radius=10,
+            fg_color=GREEN, hover_color=GREEN_DIM,
+            font=self._font(14, "bold"), text_color=TEXT,
+            command=self._do_login)
+        self._login_btn.pack(fill="x", pady=(18, 0))
+
+        # Secure Access footer
+        sep = ctk.CTkFrame(form, height=1, fg_color=BORDER)
+        sep.pack(fill="x", pady=(20, 12))
+        ctk.CTkLabel(form, text="🔒  Secure Access", font=self._font(11, "bold"),
+                     text_color=GREEN).pack()
+        ctk.CTkLabel(form, text="Enter your GoHireVirtual hub credentials",
+                     font=self._font(10), text_color=TEXT_MUTED).pack(pady=(2, 0))
+
+        self._user_entry.focus()
+
+    def _toggle_pw(self):
+        self._pw_visible = not self._pw_visible
+        self._pw_entry.configure(show="" if self._pw_visible else "•")
+
+    def _do_login(self):
+        username = self._user_entry.get().strip()
+        password = self._pw_entry.get()
         if not username or not password:
-            messagebox.showerror("Error", "Please enter both username and password")
+            self._login_btn.configure(text="Enter username & password")
+            self.root.after(2000, lambda: self._login_btn.configure(text="Login"))
             return
-        
-        self.login_btn.config(state=tk.DISABLED, text="Logging in...")
-        
-        def login_thread():
+        self._login_btn.configure(state="disabled", text="Signing in…")
+
+        def _thread():
             result = monitor.login(username, password)
-            self.root.after(0, lambda: self.handle_login_result(result))
-        
-        threading.Thread(target=login_thread, daemon=True).start()
-    
-    def handle_login_result(self, result):
-        if result['success']:
-            self.show_status_screen()
+            self.root.after(0, lambda: self._handle_login(result))
+
+        threading.Thread(target=_thread, daemon=True).start()
+
+    def _handle_login(self, result):
+        if result["success"]:
+            self._show_status()
         else:
-            # Show the actual error message from the server
-            error_msg = result.get('message', 'Invalid credentials')
-            messagebox.showerror("Login Failed", error_msg)
-            self.login_btn.config(state=tk.NORMAL, text="Login")
-    
-    def show_status_screen(self):
-        self.clear_window()
-        
-        header_frame = tk.Frame(self.root, bg='white', padx=20, pady=15)
-        header_frame.pack(fill=tk.X)
-        
-        tk.Label(header_frame, text="Monitor Status", font=("Arial", 16, "bold"),
-                bg='white').pack(side=tk.LEFT)
-        
-        tk.Button(header_frame, text="Logout", font=("Arial", 10),
-                 cursor='hand2', command=self.do_logout).pack(side=tk.RIGHT)
-        
-        status_frame = tk.Frame(self.root, bg='white', padx=20, pady=20)
-        status_frame.pack(fill=tk.X, padx=20, pady=(10, 0))
-        
-        indicator_frame = tk.Frame(status_frame, bg='white')
-        indicator_frame.pack(fill=tk.X)
-        
-        self.status_dot = tk.Canvas(indicator_frame, width=20, height=20, 
-                                    bg='white', highlightthickness=0)
-        self.status_dot.pack(side=tk.LEFT, padx=(0, 10))
-        
-        status_text_frame = tk.Frame(indicator_frame, bg='white')
-        status_text_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        
-        self.status_title = tk.Label(status_text_frame, text="Not Active",
-                                     font=("Arial", 14, "bold"), bg='white')
-        self.status_title.pack(anchor=tk.W)
-        
-        self.status_subtitle = tk.Label(status_text_frame, text="Waiting for clock in",
-                                       font=("Arial", 10), fg='#6b7280', bg='white')
-        self.status_subtitle.pack(anchor=tk.W)
-        
-        stats_frame = tk.Frame(self.root)
-        stats_frame.pack(fill=tk.X, padx=20, pady=10)
-        
-        stat1 = tk.Frame(stats_frame, bg='white', padx=15, pady=15)
-        stat1.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 5))
-        
-        tk.Label(stat1, text="Last Capture", font=("Arial", 9), fg='#6b7280',
-                bg='white').pack(anchor=tk.W)
-        self.last_capture_label = tk.Label(stat1, text="Never", font=("Arial", 14, "bold"),
-                                          bg='white')
-        self.last_capture_label.pack(anchor=tk.W)
-        
-        stat2 = tk.Frame(stats_frame, bg='white', padx=15, pady=15)
-        stat2.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(5, 0))
-        
-        tk.Label(stat2, text="Queue", font=("Arial", 9), fg='#6b7280',
-                bg='white').pack(anchor=tk.W)
-        self.queue_label = tk.Label(stat2, text="0", font=("Arial", 14, "bold"),
-                                    bg='white')
-        self.queue_label.pack(anchor=tk.W)
-        
-        info_frame = tk.Frame(self.root, bg='#f9fafb', padx=20, pady=15)
-        info_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=(10, 20))
-        
-        tk.Label(info_frame, text="How it works", font=("Arial", 11, "bold"),
-                bg='#f9fafb').pack(anchor=tk.W, pady=(0, 10))
-        
-        for text in [
-            "• Automatically starts when you clock in",
-            "• Captures desktop every 10 minutes",
-            "• Pauses during lunch breaks",
-            "• Stops when you clock out"
+            msg = result.get("message", "Invalid credentials")
+            self._login_btn.configure(state="normal", text=f"✕  {msg[:38]}")
+            self.root.after(3000, lambda: self._login_btn.configure(text="Login"))
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # STATUS SCREEN
+    # ─────────────────────────────────────────────────────────────────────────
+    def _show_status(self):
+        self._clear()
+        self.root.geometry("380x600")
+
+        # ── Header ────────────────────────────────────────────────────────
+        hdr = ctk.CTkFrame(self.root, height=60, fg_color=BG_CARD,
+                           corner_radius=0)
+        hdr.pack(fill="x")
+        hdr.pack_propagate(False)
+
+        ctk.CTkLabel(hdr, text="Monitor Status", font=self._font(16, "bold"),
+                     text_color=TEXT).place(x=20, rely=0.5, anchor="w")
+        ctk.CTkButton(hdr, text="⎋  Logout", width=90, height=32,
+                      corner_radius=8, fg_color="transparent",
+                      border_color=BORDER, border_width=1,
+                      hover_color="#2a2a2a", text_color=TEXT_SUB,
+                      font=self._font(11), command=self._do_logout
+                      ).place(relx=1, x=-20, rely=0.5, anchor="e")
+
+        # ── Main status card ──────────────────────────────────────────────
+        card = ctk.CTkFrame(self.root, fg_color=BG_CARD, corner_radius=14)
+        card.pack(fill="x", padx=20, pady=(16, 0))
+
+        inner = ctk.CTkFrame(card, fg_color="transparent")
+        inner.pack(padx=20, pady=20, fill="x")
+
+        # Left: circular canvas indicator
+        left = ctk.CTkFrame(inner, fg_color="transparent", width=88)
+        left.pack(side="left")
+        left.pack_propagate(False)
+        self._ring_canvas = tk.Canvas(left, width=80, height=80,
+                                      bg=BG_CARD, highlightthickness=0)
+        self._ring_canvas.pack()
+
+        # Right: text block
+        right = ctk.CTkFrame(inner, fg_color="transparent")
+        right.pack(side="left", fill="both", expand=True, padx=(16, 0))
+
+        self._status_title = ctk.CTkLabel(
+            right, text="Not Active", font=self._font(15, "bold"),
+            text_color=TEXT, anchor="w")
+        self._status_title.pack(fill="x")
+
+        self._status_sub = ctk.CTkLabel(
+            right, text="Waiting for clock in",
+            font=self._font(11), text_color=TEXT_SUB, anchor="w",
+            wraplength=190)
+        self._status_sub.pack(fill="x", pady=(2, 8))
+
+        self._badge = ctk.CTkLabel(
+            right, text="  OFFLINE  ", font=self._font(9, "bold"),
+            fg_color="#2a2a2a", text_color=TEXT_MUTED,
+            corner_radius=10, width=72, height=22)
+        self._badge.pack(anchor="w")
+
+        # ── Stat cards ────────────────────────────────────────────────────
+        stats = ctk.CTkFrame(self.root, fg_color="transparent")
+        stats.pack(fill="x", padx=20, pady=(12, 0))
+
+        s1 = ctk.CTkFrame(stats, fg_color=BG_CARD, corner_radius=12)
+        s1.pack(side="left", fill="both", expand=True, padx=(0, 6))
+        ctk.CTkLabel(s1, text="🕐  Last Capture", font=self._font(10),
+                     text_color=TEXT_MUTED).pack(anchor="w", padx=14, pady=(14, 2))
+        self._last_cap = ctk.CTkLabel(s1, text="Never",
+                                      font=self._font(15, "bold"),
+                                      text_color=TEXT)
+        self._last_cap.pack(anchor="w", padx=14)
+        ctk.CTkLabel(s1, text="Screenshots", font=self._font(9),
+                     text_color=TEXT_MUTED).pack(anchor="w", padx=14, pady=(0, 14))
+
+        s2 = ctk.CTkFrame(stats, fg_color=BG_CARD, corner_radius=12)
+        s2.pack(side="left", fill="both", expand=True, padx=(6, 0))
+        ctk.CTkLabel(s2, text="📋  Queue", font=self._font(10),
+                     text_color=TEXT_MUTED).pack(anchor="w", padx=14, pady=(14, 2))
+        self._queue_lbl = ctk.CTkLabel(s2, text="0",
+                                       font=self._font(15, "bold"),
+                                       text_color=TEXT)
+        self._queue_lbl.pack(anchor="w", padx=14)
+        ctk.CTkLabel(s2, text="Screenshots", font=self._font(9),
+                     text_color=TEXT_MUTED).pack(anchor="w", padx=14, pady=(0, 14))
+
+        # ── How it works ──────────────────────────────────────────────────
+        hw = ctk.CTkFrame(self.root, fg_color=BG_CARD, corner_radius=14)
+        hw.pack(fill="x", padx=20, pady=(12, 0))
+
+        ctk.CTkLabel(hw, text="How it works", font=self._font(12, "bold"),
+                     text_color=TEXT).pack(anchor="w", padx=18, pady=(16, 8))
+
+        for line in [
+            "Automatically starts when you clock in",
+            "Captures desktop on your assigned interval",
+            "Pauses during lunch breaks",
+            "Stops when you clock out",
         ]:
-            tk.Label(info_frame, text=text, font=("Arial", 9), fg='#6b7280',
-                    bg='#f9fafb').pack(anchor=tk.W, pady=2)
-        
+            row = ctk.CTkFrame(hw, fg_color="transparent")
+            row.pack(fill="x", padx=18, pady=3)
+            ctk.CTkLabel(row, text="✓", font=self._font(11, "bold"),
+                         text_color=GREEN, width=18).pack(side="left")
+            ctk.CTkLabel(row, text=line, font=self._font(11),
+                         text_color=TEXT_SUB, anchor="w").pack(side="left", padx=(6, 0))
+        ctk.CTkFrame(hw, height=14, fg_color="transparent").pack()
+
+        # ── Footer ────────────────────────────────────────────────────────
+        foot = ctk.CTkFrame(self.root, fg_color="transparent")
+        foot.pack(fill="x", pady=(14, 8))
+        ctk.CTkLabel(foot, text="🛡  Secure. Private. Transparent.",
+                     font=self._font(10, "bold"), text_color=TEXT_MUTED).pack()
+        ctk.CTkLabel(foot, text="GoHireVirtual Monitoring System",
+                     font=self._font(9), text_color="#333333").pack(pady=(2, 0))
+
         self.update_status()
-    
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # RING CANVAS
+    # ─────────────────────────────────────────────────────────────────────────
+    def _draw_ring(self, color):
+        c = self._ring_canvas
+        c.delete("all")
+        cx, cy, r_out, r_in = 40, 40, 36, 26
+        # Background ring
+        c.create_oval(cx-r_out, cy-r_out, cx+r_out, cy+r_out,
+                      outline="#2a2a2a", width=8)
+        # Coloured arc (270° sweep for "full" look)
+        # tkinter arc: start=90 (top), extent=270
+        c.create_arc(cx-r_out, cy-r_out, cx+r_out, cy+r_out,
+                     start=90, extent=-270,
+                     outline=color, width=8, style="arc")
+        # Centre icon — monitor symbol using text
+        c.create_text(cx, cy, text="⊡", fill=color,
+                      font=("Segoe UI Symbol", 18))
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # STATUS UPDATE
+    # ─────────────────────────────────────────────────────────────────────────
     def update_status(self):
-        if not hasattr(self, 'status_dot'):
+        if not hasattr(self, "_status_title"):
             return
-        
-        self.status_dot.delete("all")
-        
+
+        interval = CONFIG.get("CAPTURE_INTERVAL_MINUTES", 10)
+
         if monitor.is_monitoring:
             if monitor.is_paused:
-                color = '#eab308'
-                self.status_title.config(text="Paused")
-                self.status_subtitle.config(text="Lunch break - monitoring paused")
+                self._draw_ring("#eab308")
+                self._status_title.configure(text="On Lunch Break")
+                self._status_sub.configure(text="Monitoring paused. Resumes when you return.")
+                self._badge.configure(text="  PAUSED  ",
+                                      fg_color="#2d2600", text_color="#eab308")
             else:
-                color = '#22c55e'
-                self.status_title.config(text="Monitoring Active")
-                self.status_subtitle.config(text="Capturing screenshots every 10 minutes")
+                self._draw_ring(GREEN_GLOW)
+                self._status_title.configure(text="Monitoring Active")
+                self._status_sub.configure(
+                    text=f"Capturing screenshots every {interval} min")
+                self._badge.configure(text="  ACTIVE  ",
+                                      fg_color="#071407", text_color=GREEN_GLOW)
         else:
-            color = '#9ca3af'
-            self.status_title.config(text="Not Active")
-            self.status_subtitle.config(text="Waiting for clock in")
-        
-        self.status_dot.create_oval(4, 4, 16, 16, fill=color, outline='')
-        self.queue_label.config(text=str(len(monitor.upload_queue)))
-    
+            self._draw_ring("#333333")
+            self._status_title.configure(text="Not Active")
+            self._status_sub.configure(text="Waiting for you to clock in")
+            self._badge.configure(text="  OFFLINE  ",
+                                  fg_color="#1a1a1a", text_color=TEXT_MUTED)
+
+        self._queue_lbl.configure(text=str(len(monitor.upload_queue)))
+
     def on_screenshot(self, status):
-        if status == 'success':
-            self.last_capture_label.config(text="Just now")
+        if status == "success" and hasattr(self, "_last_cap"):
+            from datetime import datetime
+            self._last_cap.configure(
+                text=datetime.now().strftime("%-I:%M %p")
+                     if hasattr(datetime.now(), "strftime") else "Just now")
         self.update_status()
-    
-    def do_logout(self):
-        if messagebox.askyesno("Logout", "Are you sure you want to logout?"):
-            monitor.logout()
-            self.show_login_screen()
-    
-    def clear_window(self):
-        for widget in self.root.winfo_children():
-            widget.destroy()
-    
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # LOGOUT
+    # ─────────────────────────────────────────────────────────────────────────
+    def _do_logout(self):
+        monitor.logout()
+        self._show_login()
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # RUN
+    # ─────────────────────────────────────────────────────────────────────────
     def run(self):
         self.root.mainloop()
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     app = MonitorGUI()
     app.run()
