@@ -8,15 +8,27 @@ block_cipher = None
 # Falls back to None = "build for the current runner" when unset.
 TARGET_ARCH = os.environ.get('GHV_TARGET_ARCH') or None
 
+# customtkinter ships its own theme JSON files that must be bundled.
+import customtkinter
+CTK_PATH = os.path.dirname(customtkinter.__file__)
+
 a = Analysis(
     ['app.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[
+        (CTK_PATH, 'customtkinter'),
+    ],
     hiddenimports=[
         'PIL._tkinter_finder',
         'schedule',
         'Quartz',
+        'customtkinter',
+        'customtkinter.windows',
+        'customtkinter.windows.widgets',
+        'customtkinter.windows.widgets.appearance_mode',
+        'customtkinter.windows.widgets.scaling',
+        'customtkinter.windows.widgets.font',
     ],
     hookspath=[],
     hooksconfig={},
