@@ -8,6 +8,7 @@ import tkinter as tk
 import customtkinter as ctk
 import threading
 import math
+from datetime import datetime
 from main import monitor, CONFIG
 
 # ── Palette ───────────────────────────────────────────────────────────────────
@@ -41,9 +42,15 @@ class MonitorGUI:
         y = (self.root.winfo_screenheight() - 600) // 2
         self.root.geometry(f"380x600+{x}+{y}")
 
-        monitor.on_status_changed    = self.update_status
-        monitor.on_screenshot_captured = self.on_screenshot
-        monitor.on_update_required   = self._on_update_required
+        # These fire from the background scheduler thread (capture_and_upload,
+        # start_monitoring, etc. all run there). Tkinter widgets are not
+        # thread-safe — touching them off the main thread can silently no-op
+        # (this is why "Last Capture" could freeze at "Never" even while
+        # real captures were landing successfully). root.after(0, ...)
+        # marshals the call onto the main thread where it's safe.
+        monitor.on_status_changed      = lambda: self.root.after(0, self.update_status)
+        monitor.on_screenshot_captured = lambda status: self.root.after(0, lambda: self.on_screenshot(status))
+        monitor.on_update_required     = self._on_update_required
 
         self._show_login()
         threading.Thread(target=monitor.run_scheduler, daemon=True).start()
@@ -295,35 +302,9 @@ class MonitorGUI:
             corner_radius=10, width=72, height=22)
         self._badge.pack(anchor="w")
 
-        # ── Stat cards ────────────────────────────────────────────────────
-        stats = ctk.CTkFrame(self.root, fg_color="transparent")
-        stats.pack(fill="x", padx=20, pady=(12, 0))
-
-        s1 = ctk.CTkFrame(stats, fg_color=BG_CARD, corner_radius=12)
-        s1.pack(side="left", fill="both", expand=True, padx=(0, 6))
-        ctk.CTkLabel(s1, text="🕐  Last Capture", font=self._font(10),
-                     text_color=TEXT_MUTED).pack(anchor="w", padx=14, pady=(14, 2))
-        self._last_cap = ctk.CTkLabel(s1, text="Never",
-                                      font=self._font(15, "bold"),
-                                      text_color=TEXT)
-        self._last_cap.pack(anchor="w", padx=14)
-        ctk.CTkLabel(s1, text="Screenshots", font=self._font(9),
-                     text_color=TEXT_MUTED).pack(anchor="w", padx=14, pady=(0, 14))
-
-        s2 = ctk.CTkFrame(stats, fg_color=BG_CARD, corner_radius=12)
-        s2.pack(side="left", fill="both", expand=True, padx=(6, 0))
-        ctk.CTkLabel(s2, text="📋  Queue", font=self._font(10),
-                     text_color=TEXT_MUTED).pack(anchor="w", padx=14, pady=(14, 2))
-        self._queue_lbl = ctk.CTkLabel(s2, text="0",
-                                       font=self._font(15, "bold"),
-                                       text_color=TEXT)
-        self._queue_lbl.pack(anchor="w", padx=14)
-        ctk.CTkLabel(s2, text="Screenshots", font=self._font(9),
-                     text_color=TEXT_MUTED).pack(anchor="w", padx=14, pady=(0, 14))
-
         # ── How it works ──────────────────────────────────────────────────
         hw = ctk.CTkFrame(self.root, fg_color=BG_CARD, corner_radius=14)
-        hw.pack(fill="x", padx=20, pady=(12, 16))
+        hw.pack(fill="x", padx=20, pady=(16, 16))
 
         ctk.CTkLabel(hw, text="How it works", font=self._font(12, "bold"),
                      text_color=TEXT).pack(anchor="w", padx=18, pady=(16, 8))
@@ -400,14 +381,7 @@ class MonitorGUI:
             self._badge.configure(text="  OFFLINE  ",
                                   fg_color="#1a1a1a", text_color=TEXT_MUTED)
 
-        self._queue_lbl.configure(text=str(len(monitor.upload_queue)))
-
     def on_screenshot(self, status):
-        if status == "success" and hasattr(self, "_last_cap"):
-            from datetime import datetime
-            self._last_cap.configure(
-                text=datetime.now().strftime("%-I:%M %p")
-                     if hasattr(datetime.now(), "strftime") else "Just now")
         self.update_status()
 
     # ─────────────────────────────────────────────────────────────────────────
