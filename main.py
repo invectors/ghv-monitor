@@ -11,6 +11,7 @@ import threading
 import schedule
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from version import VERSION
 
 import mss
 import requests
@@ -188,6 +189,8 @@ class ScreenshotMonitor:
         self.is_idle = False  # True between sending 'start' and 'end' events
         self.last_capture_success = None  # unix ts of last successful capture (watchdog)
         self._capture_job = None  # schedule job reference for dynamic rescheduling
+        self.on_update_required = None  # callback(min_version: str) when server demands upgrade
+        self.server_capture_disabled = False  # True when admin turned off capture for this user
         
         # Load saved data
         self.load_config()
@@ -332,22 +335,46 @@ class ScreenshotMonitor:
     def capture_screenshot(self):
         try:
             print("[Screenshot] Capturing desktop...")
-            with mss.mss() as sct:
-                monitor = sct.monitors[0]
-                screenshot = sct.grab(monitor)
-                img = Image.frombytes('RGB', screenshot.size, screenshot.rgb)
-                
-                if img.width > CONFIG['MAX_IMAGE_WIDTH']:
-                    ratio = CONFIG['MAX_IMAGE_WIDTH'] / img.width
-                    new_height = int(img.height * ratio)
-                    img = img.resize((CONFIG['MAX_IMAGE_WIDTH'], new_height), Image.Resampling.LANCZOS)
-                
-                buffer = BytesIO()
-                img.save(buffer, format='JPEG', quality=CONFIG['IMAGE_QUALITY'])
-                img_bytes = buffer.getvalue()
-                
-                print(f"[Screenshot] Captured ({len(img_bytes)} bytes)")
-                return img_bytes
+
+            if IS_MACOS:
+                # mss produces blank images on macOS Tahoe 26+ due to a
+                # CGDisplayCreateImageForRect compositing change. Use the
+                # built-in `screencapture` CLI instead — it honours Screen
+                # Recording permission (already granted since mss was working
+                # before Tahoe) and works on every macOS version.
+                import tempfile, subprocess, os as _os
+                with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as _f:
+                    _tmp = _f.name
+                try:
+                    subprocess.run(
+                        ['screencapture', '-x', '-t', 'png', _tmp],
+                        check=True, timeout=15
+                    )
+                    img = Image.open(_tmp).convert('RGB')
+                finally:
+                    try:
+                        _os.unlink(_tmp)
+                    except OSError:
+                        pass
+            else:
+                # Windows / Linux — mss works fine
+                with mss.mss() as sct:
+                    monitor = sct.monitors[0]
+                    screenshot = sct.grab(monitor)
+                    img = Image.frombytes('RGB', screenshot.size, screenshot.rgb)
+
+            if img.width > CONFIG['MAX_IMAGE_WIDTH']:
+                ratio = CONFIG['MAX_IMAGE_WIDTH'] / img.width
+                new_height = int(img.height * ratio)
+                img = img.resize((CONFIG['MAX_IMAGE_WIDTH'], new_height),
+                                 Image.Resampling.LANCZOS)
+
+            buffer = BytesIO()
+            img.save(buffer, format='JPEG', quality=CONFIG['IMAGE_QUALITY'])
+            img_bytes = buffer.getvalue()
+
+            print(f"[Screenshot] Captured ({len(img_bytes)} bytes)")
+            return img_bytes
         except Exception as e:
             print(f"[Screenshot] Error: {e}")
             raise
@@ -476,8 +503,31 @@ class ScreenshotMonitor:
             # screenshot_settings overrides (or the global default).
             # Apply it live so the per-user override actually takes effect.
             srv_interval = status.get('capture_interval_minutes')
-            if isinstance(srv_interval, (int, float)) and srv_interval > 0:
-                self._reschedule_capture(int(srv_interval))
+            try:
+                srv_interval = int(float(srv_interval)) if srv_interval is not None else None
+            except (TypeError, ValueError):
+                srv_interval = None
+            if srv_interval and srv_interval > 0:
+                self._reschedule_capture(srv_interval)
+            # ─────────────────────────────────────────────────────────────────
+
+            # ── Honor server-side capture_enabled / is_enabled toggles ────────
+            # status.php sets reason='disabled' when the admin has turned off
+            # capture (global default's "Capture enabled"/"System enabled", or
+            # this user's specific override toggles). Without this, those
+            # checkboxes on the settings page had zero effect on the app.
+            self.server_capture_disabled = (status.get('reason') == 'disabled')
+            # ─────────────────────────────────────────────────────────────────
+
+            # ── Force-update check ────────────────────────────────────────────
+            # The server broadcasts min_app_version on every sync.
+            # If the running build is older, fire on_update_required so the
+            # GUI can block usage until the user installs the new build.
+            min_ver = status.get('min_app_version', '').strip()
+            if min_ver and self._parse_version(min_ver) > self._parse_version(VERSION):
+                print(f"[Update] Server requires {min_ver}, running {VERSION}")
+                if self.on_update_required:
+                    self.on_update_required(min_ver)
             # ─────────────────────────────────────────────────────────────────
 
             if status.get('active') and status.get('clocked_in') and not status.get('on_lunch'):
@@ -590,6 +640,8 @@ class ScreenshotMonitor:
         a missed schedule, or any other stall that doesn't raise."""
         if not self.is_monitoring or self.is_paused:
             return
+        if self.server_capture_disabled:
+            return
         interval = CONFIG['CAPTURE_INTERVAL_MINUTES'] * 60
         # Allow 2x the interval before we consider it stalled.
         max_gap = interval * 2 + 30
@@ -614,6 +666,9 @@ class ScreenshotMonitor:
     def capture_and_upload(self):
         if not self.is_monitoring or self.is_paused:
             print("[Capture] Skipping (not monitoring or paused)")
+            return
+        if self.server_capture_disabled:
+            print("[Capture] Skipping (admin disabled capture for this user)")
             return
         if self.is_idle:
             # SAFETY: only honor the idle-skip if the idle reading is still
@@ -704,6 +759,14 @@ class ScreenshotMonitor:
         
         print("[Monitor] Started")
     
+    @staticmethod
+    def _parse_version(v: str):
+        """Convert 'v1.10.3' or '1.10.3' to a comparable tuple (1, 10, 3)."""
+        try:
+            return tuple(int(x) for x in v.lstrip('v').split('.'))
+        except (ValueError, AttributeError):
+            return (0, 0, 0)
+
     def _reschedule_capture(self, new_interval_minutes):
         """Update the capture interval live without restarting the app.
         Called by sync_with_tracker when the server returns a different
@@ -715,19 +778,27 @@ class ScreenshotMonitor:
             return
 
         if new_interval_minutes == CONFIG['CAPTURE_INTERVAL_MINUTES']:
-            return  # no change
+            # Same interval — but verify the job is still alive in the scheduler.
+            # If capture_and_upload raised an unhandled exception, schedule may
+            # have silently dropped the job, causing non-override users to go
+            # dark while override users (who recreate the job on each reschedule)
+            # continue working fine.
+            if self._capture_job is not None and self._capture_job in schedule.jobs:
+                return  # job healthy, nothing to do
+            # Job is missing — fall through and recreate it.
+            print(f"[Monitor] Capture job missing, recreating at {new_interval_minutes}m")
 
-        print(f"[Monitor] Capture interval changing: "
+        print(f"[Monitor] Capture interval: "
               f"{CONFIG['CAPTURE_INTERVAL_MINUTES']}m → {new_interval_minutes}m")
 
         CONFIG['CAPTURE_INTERVAL_MINUTES'] = new_interval_minutes
 
-        # Cancel the old job and schedule a new one.
         if self._capture_job is not None:
             schedule.cancel_job(self._capture_job)
             self._capture_job = None
 
-        self._capture_job = schedule.every(new_interval_minutes).minutes.do(self.capture_and_upload)
+        self._capture_job = schedule.every(new_interval_minutes).minutes.do(
+            self.capture_and_upload)
         print(f"[Monitor] Rescheduled capture every {new_interval_minutes}m")
 
     def stop_monitoring(self):
