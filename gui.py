@@ -209,11 +209,11 @@ class MonitorGUI:
 
         # Left: circular canvas indicator
         left = ctk.CTkFrame(inner, fg_color="transparent", width=88)
-        left.pack(side="left")
+        left.pack(side="left", fill="y")
         left.pack_propagate(False)
         self._ring_canvas = tk.Canvas(left, width=80, height=80,
                                       bg=BG_CARD, highlightthickness=0)
-        self._ring_canvas.pack()
+        self._ring_canvas.pack(anchor="center", expand=True)
 
         # Right: text block
         right = ctk.CTkFrame(inner, fg_color="transparent")
