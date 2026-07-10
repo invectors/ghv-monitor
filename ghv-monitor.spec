@@ -18,6 +18,7 @@ a = Analysis(
     binaries=[],
     datas=[
         (CTK_PATH, 'customtkinter'),
+        ('version.py', '.'),
     ],
     hiddenimports=[
         'PIL._tkinter_finder',
@@ -29,6 +30,7 @@ a = Analysis(
         'customtkinter.windows.widgets.appearance_mode',
         'customtkinter.windows.widgets.scaling',
         'customtkinter.windows.widgets.font',
+        'version',
     ],
     hookspath=[],
     hooksconfig={},
