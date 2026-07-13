@@ -438,6 +438,31 @@ class ScreenshotMonitor:
                 # built-in `screencapture` CLI instead — it honours Screen
                 # Recording permission and works on every macOS version.
                 import tempfile, subprocess, os as _os
+
+                # ── Screen Recording permission preflight ──
+                # Definitive check of whether THIS process (at its current
+                # path/signature) holds the TCC Screen Recording grant.
+                # Wallpaper-only captures + "could not create image from
+                # display" both trace back to this being False. If missing,
+                # CGRequestScreenCaptureAccess fires the system prompt /
+                # deep-links the user to the right Settings pane.
+                try:
+                    from Quartz import (CGPreflightScreenCaptureAccess,
+                                        CGRequestScreenCaptureAccess)
+                    _has_perm = bool(CGPreflightScreenCaptureAccess())
+                    print(f"[Permission] Screen Recording access: {_has_perm}")
+                    if not _has_perm:
+                        print(f"[Permission] Running from: {sys.executable}")
+                        print("[Permission] MISSING — requesting access "
+                              "(user must grant in System Settings, then "
+                              "FULLY QUIT and reopen this app)")
+                        CGRequestScreenCaptureAccess()
+                except ImportError:
+                    print("[Permission] Preflight API unavailable in this "
+                          "Quartz build — skipping check")
+                except Exception as _perm_err:
+                    print(f"[Permission] Preflight check failed: {_perm_err}")
+
                 img = None
                 with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as _f:
                     _tmp = _f.name
