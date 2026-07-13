@@ -19,6 +19,102 @@ from PIL import Image
 from io import BytesIO
 import base64
 
+# ── File logging for packaged builds ─────────────────────────────────────────
+# PyInstaller windowed builds (console=False) have sys.stdout = None, so every
+# print() diagnostic silently vanishes. Redirect stdout/stderr to a log file in
+# the user's home folder so we can actually read what the app is doing on a
+# user's machine: ~/GHV-Monitor.log
+if getattr(sys, 'frozen', False):
+    try:
+        _log_path = Path.home() / 'GHV-Monitor.log'
+        # Rotate: keep it from growing unbounded (5 MB cap)
+        if _log_path.exists() and _log_path.stat().st_size > 5 * 1024 * 1024:
+            _log_path.unlink()
+        _log_file = open(_log_path, 'a', buffering=1, encoding='utf-8')
+        sys.stdout = _log_file
+        sys.stderr = _log_file
+        print(f"\n{'='*60}")
+        print(f"=== GHV Monitor v{VERSION} started {datetime.now().isoformat()}")
+        print(f"=== platform={sys.platform}")
+        print(f"{'='*60}")
+    except Exception:
+        pass  # never let logging setup crash the app
+
+
+
+# ── FILE LOGGING ────────────────────────────────────────────────────────────
+# The packaged app runs windowed (console=False), so print() output has
+# nowhere to go — a silent capture failure leaves zero trace, forcing
+# database archaeology every time captures mysteriously stop. This tees
+# every print() call to a rotating log file so the actual error is always
+# on disk, regardless of build type.
+def _get_log_dir():
+    try:
+        if sys.platform == 'win32':
+            base = os.environ.get('APPDATA') or str(Path.home())
+            d = Path(base) / 'GHV-Monitor'
+        else:
+            d = Path.home() / '.config' / 'GHV-Monitor'
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+    except Exception:
+        return Path.home()  # last-resort fallback, always exists
+
+_LOG_DIR = _get_log_dir()
+_LOG_FILE = _LOG_DIR / 'ghv-monitor.log'
+_LOG_MAX_BYTES = 2 * 1024 * 1024  # 2MB — rotate before it gets unwieldy
+
+def _rotate_log_if_needed():
+    try:
+        if _LOG_FILE.exists() and _LOG_FILE.stat().st_size > _LOG_MAX_BYTES:
+            old = _LOG_FILE.with_suffix('.log.old')
+            if old.exists():
+                old.unlink()
+            _LOG_FILE.rename(old)
+    except Exception:
+        pass  # logging must never crash the app
+
+_rotate_log_if_needed()
+
+class _TeeStream:
+    """Writes to the original stream (if one exists — often None in a
+    windowed PyInstaller build) AND to the log file, timestamped."""
+    def __init__(self, original):
+        self._original = original
+        try:
+            self._fh = open(_LOG_FILE, 'a', encoding='utf-8', buffering=1)
+        except Exception:
+            self._fh = None
+
+    def write(self, text):
+        if self._original:
+            try:
+                self._original.write(text)
+            except Exception:
+                pass
+        if self._fh and text.strip():
+            try:
+                ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                for line in text.splitlines():
+                    if line.strip():
+                        self._fh.write(f"[{ts}] {line}\n")
+                self._fh.flush()
+            except Exception:
+                pass
+
+    def flush(self):
+        for s in (self._original, self._fh):
+            if s:
+                try:
+                    s.flush()
+                except Exception:
+                    pass
+
+sys.stdout = _TeeStream(sys.stdout)
+sys.stderr = _TeeStream(sys.stderr)
+print(f"[Startup] GHV Monitor v{VERSION} — log file: {_LOG_FILE}")
+# ─────────────────────────────────────────────────────────────────────────
+
 
 # Idle detection.
 # On macOS, pynput's keyboard listener calls main-thread-only Carbon
@@ -340,22 +436,46 @@ class ScreenshotMonitor:
                 # mss produces blank images on macOS Tahoe 26+ due to a
                 # CGDisplayCreateImageForRect compositing change. Use the
                 # built-in `screencapture` CLI instead — it honours Screen
-                # Recording permission (already granted since mss was working
-                # before Tahoe) and works on every macOS version.
+                # Recording permission and works on every macOS version.
                 import tempfile, subprocess, os as _os
+                img = None
                 with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as _f:
                     _tmp = _f.name
                 try:
-                    subprocess.run(
-                        ['screencapture', '-x', '-t', 'png', _tmp],
-                        check=True, timeout=15
+                    # GUI-launched apps get a minimal PATH; use the absolute
+                    # binary path so we never depend on PATH resolution.
+                    _bin = '/usr/sbin/screencapture'
+                    if not _os.path.exists(_bin):
+                        _bin = 'screencapture'  # fall back to PATH lookup
+                    _res = subprocess.run(
+                        [_bin, '-x', '-t', 'png', _tmp],
+                        capture_output=True, timeout=15
                     )
-                    img = Image.open(_tmp).convert('RGB')
+                    if _res.returncode != 0:
+                        print(f"[Screenshot] screencapture rc={_res.returncode} "
+                              f"stderr={_res.stderr.decode(errors='replace')[:300]}")
+                    elif _os.path.getsize(_tmp) == 0:
+                        print("[Screenshot] screencapture produced empty file")
+                    else:
+                        img = Image.open(_tmp).convert('RGB')
+                except Exception as _sc_err:
+                    print(f"[Screenshot] screencapture failed: {_sc_err}")
                 finally:
                     try:
                         _os.unlink(_tmp)
                     except OSError:
                         pass
+
+                if img is None:
+                    # Last-resort fallback: mss. On pre-Tahoe this is fully
+                    # correct; on Tahoe it may produce a blank frame, but a
+                    # blank upload still proves the pipeline works end-to-end
+                    # (and is visible in the hub), which beats silence.
+                    print("[Screenshot] Falling back to mss")
+                    with mss.mss() as sct:
+                        monitor = sct.monitors[0]
+                        screenshot = sct.grab(monitor)
+                        img = Image.frombytes('RGB', screenshot.size, screenshot.rgb)
             else:
                 # Windows / Linux — mss works fine
                 with mss.mss() as sct:
@@ -377,6 +497,8 @@ class ScreenshotMonitor:
             return img_bytes
         except Exception as e:
             print(f"[Screenshot] Error: {e}")
+            import traceback
+            traceback.print_exc()
             raise
     
     def upload_screenshot(self, image_bytes):
@@ -690,6 +812,7 @@ class ScreenshotMonitor:
             
             if result.get('success'):
                 self.last_capture_success = time.time()
+                print(f"[Capture] Success — uploaded {len(image_bytes)} bytes")
                 self.process_queue()
                 if self.on_screenshot_captured:
                     self.on_screenshot_captured('success')
@@ -703,6 +826,8 @@ class ScreenshotMonitor:
                 
         except Exception as e:
             print(f"[Capture] Error: {e}")
+            import traceback
+            traceback.print_exc()
             if self.on_screenshot_captured:
                 self.on_screenshot_captured('error')
     
@@ -742,21 +867,33 @@ class ScreenshotMonitor:
         self.is_monitoring = True
         self.is_paused = False
 
-        # Begin OS idle detection (idempotent — safe to call repeatedly)
-        self.idle_detector.start()
-        schedule.every(CONFIG['IDLE_CHECK_INTERVAL_SECONDS']).seconds.do(self.check_idle)
-
+        # ── CAPTURE FIRST ──
+        # Schedule the capture job BEFORE anything that could raise (the idle
+        # detector's Quartz init has failed on some macOS builds). If idle
+        # detection breaks, we lose idle tracking — but never screenshots.
         self._capture_job = schedule.every(CONFIG['CAPTURE_INTERVAL_MINUTES']).minutes.do(self.capture_and_upload)
         threading.Timer(5.0, self.capture_and_upload).start()
+        print(f"[Monitor] Capture job scheduled every {CONFIG['CAPTURE_INTERVAL_MINUTES']}m")
+
         # Watchdog: catch the case where captures silently stop while the app
         # still believes it's monitoring. Runs every minute; forces a capture
         # if none has succeeded in 2× the capture interval.
         self.last_capture_success = time.time()
         schedule.every(1).minutes.do(self.capture_watchdog)
-        
+
+        # ── Idle detection (best-effort) ──
+        try:
+            self.idle_detector.start()
+            schedule.every(CONFIG['IDLE_CHECK_INTERVAL_SECONDS']).seconds.do(self.check_idle)
+            print("[Monitor] Idle detection started")
+        except Exception as e:
+            print(f"[Monitor] Idle detection failed to start (continuing without it): {e}")
+            import traceback
+            traceback.print_exc()
+
         if self.on_status_changed:
             self.on_status_changed()
-        
+
         print("[Monitor] Started")
     
     @staticmethod
