@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """
-GHV Monitor - Desktop Screenshot Monitor
+GHV Monitor — Core
+Handles screenshot capture, idle detection, clock state sync,
+clock actions (in/out/lunch), and activity window tracking.
 """
 
 import os
@@ -20,109 +22,28 @@ from io import BytesIO
 import base64
 
 # ── File logging for packaged builds ─────────────────────────────────────────
-# PyInstaller windowed builds (console=False) have sys.stdout = None, so every
-# print() diagnostic silently vanishes. Redirect stdout/stderr to a log file in
-# the user's home folder so we can actually read what the app is doing on a
-# user's machine: ~/GHV-Monitor.log
 if getattr(sys, 'frozen', False):
     try:
-        _log_path = Path.home() / 'GHV-Monitor.log'
-        # Rotate: keep it from growing unbounded (5 MB cap)
+        _log_dir  = Path.home() / '.config' / 'GHV-Monitor'
+        _log_dir.mkdir(parents=True, exist_ok=True)
+        _log_path = _log_dir / 'ghv-monitor.log'
         if _log_path.exists() and _log_path.stat().st_size > 5 * 1024 * 1024:
             _log_path.unlink()
         _log_file = open(_log_path, 'a', buffering=1, encoding='utf-8')
         sys.stdout = _log_file
         sys.stderr = _log_file
         print(f"\n{'='*60}")
-        print(f"=== GHV Monitor v{VERSION} started {datetime.now().isoformat()}")
-        print(f"=== platform={sys.platform}")
+        print(f"[Startup] GHV Monitor v{VERSION} — log file: {_log_path}")
         print(f"{'='*60}")
     except Exception:
-        pass  # never let logging setup crash the app
+        pass
 
+IS_MACOS   = sys.platform == 'darwin'
+IS_WINDOWS = sys.platform == 'win32'
 
-
-# ── FILE LOGGING ────────────────────────────────────────────────────────────
-# The packaged app runs windowed (console=False), so print() output has
-# nowhere to go — a silent capture failure leaves zero trace, forcing
-# database archaeology every time captures mysteriously stop. This tees
-# every print() call to a rotating log file so the actual error is always
-# on disk, regardless of build type.
-def _get_log_dir():
-    try:
-        if sys.platform == 'win32':
-            base = os.environ.get('APPDATA') or str(Path.home())
-            d = Path(base) / 'GHV-Monitor'
-        else:
-            d = Path.home() / '.config' / 'GHV-Monitor'
-        d.mkdir(parents=True, exist_ok=True)
-        return d
-    except Exception:
-        return Path.home()  # last-resort fallback, always exists
-
-_LOG_DIR = _get_log_dir()
-_LOG_FILE = _LOG_DIR / 'ghv-monitor.log'
-_LOG_MAX_BYTES = 2 * 1024 * 1024  # 2MB — rotate before it gets unwieldy
-
-def _rotate_log_if_needed():
-    try:
-        if _LOG_FILE.exists() and _LOG_FILE.stat().st_size > _LOG_MAX_BYTES:
-            old = _LOG_FILE.with_suffix('.log.old')
-            if old.exists():
-                old.unlink()
-            _LOG_FILE.rename(old)
-    except Exception:
-        pass  # logging must never crash the app
-
-_rotate_log_if_needed()
-
-class _TeeStream:
-    """Writes to the original stream (if one exists — often None in a
-    windowed PyInstaller build) AND to the log file, timestamped."""
-    def __init__(self, original):
-        self._original = original
-        try:
-            self._fh = open(_LOG_FILE, 'a', encoding='utf-8', buffering=1)
-        except Exception:
-            self._fh = None
-
-    def write(self, text):
-        if self._original:
-            try:
-                self._original.write(text)
-            except Exception:
-                pass
-        if self._fh and text.strip():
-            try:
-                ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                for line in text.splitlines():
-                    if line.strip():
-                        self._fh.write(f"[{ts}] {line}\n")
-                self._fh.flush()
-            except Exception:
-                pass
-
-    def flush(self):
-        for s in (self._original, self._fh):
-            if s:
-                try:
-                    s.flush()
-                except Exception:
-                    pass
-
-sys.stdout = _TeeStream(sys.stdout)
-sys.stderr = _TeeStream(sys.stderr)
-print(f"[Startup] GHV Monitor v{VERSION} — log file: {_LOG_FILE}")
-# ─────────────────────────────────────────────────────────────────────────
-
-
-# Idle detection.
-# On macOS, pynput's keyboard listener calls main-thread-only Carbon
-# (TSM) APIs from its background thread, which hard-crashes with
-# EXC_BAD_INSTRUCTION (SIGILL). So on macOS we use the native, thread-safe
-# Quartz idle query instead and never start pynput listeners.
-IS_MACOS = sys.platform == 'darwin'
-MACOS_IDLE_AVAILABLE = False
+# ── macOS idle detection (Quartz) ────────────────────────────────────────────
+MACOS_IDLE_AVAILABLE  = False
+PYNPUT_AVAILABLE      = False
 if IS_MACOS:
     try:
         from Quartz import (
@@ -131,321 +52,336 @@ if IS_MACOS:
             kCGAnyInputEventType,
         )
         MACOS_IDLE_AVAILABLE = True
-    except Exception:
-        print("[Idle] Quartz not available — macOS idle detection disabled")
-
-# pynput is used for idle detection on Windows/Linux only.
+    except ImportError:
+        pass
 try:
     from pynput import keyboard, mouse
     PYNPUT_AVAILABLE = True
 except ImportError:
-    PYNPUT_AVAILABLE = False
-    print("[Idle] pynput not available — idle detection disabled")
+    pass
 
-# True if *some* idle backend is usable on this platform.
 IDLE_AVAILABLE = MACOS_IDLE_AVAILABLE or (PYNPUT_AVAILABLE and not IS_MACOS)
 
-# Configuration
+# ── CONFIG ────────────────────────────────────────────────────────────────────
 CONFIG = {
-    'UPLOAD_URL': 'https://hub.gohirevirtual.net/api/screenshots/upload.php',
-    'STATUS_URL': 'https://hub.gohirevirtual.net/api/screenshots/status.php',
-    'IDLE_URL':   'https://hub.gohirevirtual.net/api/screenshots/idle.php',
-    'CAPTURE_INTERVAL_MINUTES': 10,
-    'STATUS_CHECK_SECONDS': 30,
-    'IDLE_CHECK_INTERVAL_SECONDS': 15,           # how often to poll OS for idle time
-    'IDLE_DETECTION_THRESHOLD_SECONDS': 300,     # 5 min of no input = idle
-    # Safety ceiling: if the idle detector ever reports more idle time than this,
-    # we treat it as UNTRUSTWORTHY (e.g. a dead input listener that froze
-    # last_input_time on Windows after sleep/wake or an RDP reconnect) rather
-    # than a real idle user. Above this we reset to not-idle and keep capturing.
-    # 4h comfortably exceeds any real continuous idle within a monitored shift
-    # (idle is checked every 15s; a genuinely-away user would be clocked out).
-    'IDLE_SANITY_CEILING_SECONDS': 4 * 3600,
-    'MAX_RETRY_ATTEMPTS': 3,
-    'IMAGE_QUALITY': 85,
-    'MAX_IMAGE_WIDTH': 1920,
+    'UPLOAD_URL':   'https://hub.gohirevirtual.net/api/screenshots/upload.php',
+    'STATUS_URL':   'https://hub.gohirevirtual.net/api/screenshots/status.php',
+    'IDLE_URL':     'https://hub.gohirevirtual.net/api/screenshots/idle.php',
+    'CLOCK_URL':    'https://hub.gohirevirtual.net/api/screenshots/clock.php',
+    'ACTIVITY_URL': 'https://hub.gohirevirtual.net/api/screenshots/activity.php',
+    'CAPTURE_INTERVAL_MINUTES':      10,
+    'STATUS_CHECK_SECONDS':          30,
+    'IDLE_CHECK_INTERVAL_SECONDS':   15,
+    'IDLE_DETECTION_THRESHOLD_SECONDS': 300,
+    'IDLE_SANITY_CEILING_SECONDS':   28800,
+    'MAX_IMAGE_WIDTH':               1920,
+    'IMAGE_QUALITY':                 75,
+    'MAX_RETRY_ATTEMPTS':            3,
+    'ACTIVITY_CHECK_SECONDS':        10,
+    'ACTIVITY_FLUSH_SECONDS':        120,
 }
 
-class IdleDetector:
-    """Cross-platform OS idle detector.
-
-    On macOS: uses the native, thread-safe Quartz HID idle query
-    (CGEventSourceSecondsSinceLastEventType) — no input listeners, so it
-    is safe to call from the scheduler thread and does not crash.
-
-    On Windows/Linux: uses pynput keyboard/mouse listeners to track the
-    time of the most recent input event.
-
-    `get_idle_seconds()` returns how long it's been since any input.
+# ─────────────────────────────────────────────────────────────────────────────
+# ACTIVITY TRACKER — monitors which app/window is in focus and for how long
+# ─────────────────────────────────────────────────────────────────────────────
+class ActivityTracker:
     """
-    def __init__(self):
-        self.last_input_time = time.time()
-        self._listeners = []
-        self._started = False
+    Polls the active foreground window every ~10 seconds.
+    When the window changes, it logs the previous app + duration.
+    Collected logs are flushed periodically to the server.
+    """
 
-    def _on_activity(self, *args, **kwargs):
-        self.last_input_time = time.time()
+    def __init__(self):
+        self._current_app   = None
+        self._current_title = None
+        self._session_start = None
+        self._lock          = threading.Lock()
+        self._pending       = []
+
+    # ── Platform-specific window detection ────────────────────────────────
+    def _active_window(self):
+        """Returns (app_name, window_title) or (None, None) on failure."""
+        try:
+            if IS_MACOS:
+                from AppKit import NSWorkspace
+                info = NSWorkspace.sharedWorkspace().activeApplication()
+                app  = info.get('NSApplicationName', '') if info else ''
+                return app, ''
+            elif IS_WINDOWS:
+                import win32gui, win32process
+                hwnd  = win32gui.GetForegroundWindow()
+                title = win32gui.GetWindowText(hwnd)
+                _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                try:
+                    import psutil
+                    app = psutil.Process(pid).name()
+                except Exception:
+                    app = ''
+                return app, title
+        except Exception as e:
+            print(f"[Activity] Window detection error: {e}")
+        return None, None
+
+    # ── Called by scheduler every ACTIVITY_CHECK_SECONDS ─────────────────
+    def check(self):
+        app_name, title = self._active_window()
+        if not app_name:
+            return
+        now = datetime.now(timezone.utc)
+        with self._lock:
+            if app_name != self._current_app or title != self._current_title:
+                if self._current_app and self._session_start:
+                    duration = int((now - self._session_start).total_seconds())
+                    if duration >= 5:
+                        self._pending.append({
+                            'app_name':         self._current_app,
+                            'window_title':     self._current_title or '',
+                            'started_at':       self._session_start.strftime('%Y-%m-%d %H:%M:%S'),
+                            'ended_at':         now.strftime('%Y-%m-%d %H:%M:%S'),
+                            'duration_seconds': duration,
+                        })
+                self._current_app   = app_name
+                self._current_title = title
+                self._session_start = now
+
+    def flush(self):
+        """Return and clear pending log entries."""
+        with self._lock:
+            logs = list(self._pending)
+            self._pending.clear()
+            return logs
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# IDLE DETECTOR
+# ─────────────────────────────────────────────────────────────────────────────
+class IdleDetector:
+    def __init__(self):
+        self._last_input  = time.time()
+        self._kb_listener = None
+        self._ms_listener = None
+        self._running     = False
+
+    def _on_input(self, *_):
+        self._last_input = time.time()
 
     def start(self):
-        if self._started:
+        if self._running:
             return
-        # macOS: nothing to start — idle time is queried on demand.
-        if IS_MACOS:
-            if MACOS_IDLE_AVAILABLE:
-                self._started = True
-                print("[Idle] Detector started (macOS native Quartz)")
+        self._running = True
+        if IS_MACOS and MACOS_IDLE_AVAILABLE:
+            print("[Idle] Detector started (macOS native Quartz)")
             return
-        # Windows/Linux: start pynput listeners on background threads.
-        if not PYNPUT_AVAILABLE:
-            return
-        try:
-            kb_listener = keyboard.Listener(on_press=self._on_activity)
-            ms_listener = mouse.Listener(
-                on_move=self._on_activity,
-                on_click=self._on_activity,
-                on_scroll=self._on_activity,
-            )
-            kb_listener.daemon = True
-            ms_listener.daemon = True
-            kb_listener.start()
-            ms_listener.start()
-            self._listeners = [kb_listener, ms_listener]
-            self._started = True
-            print("[Idle] Detector started (pynput)")
-        except Exception as e:
-            # Most common on Wayland or restricted/headless systems
-            print(f"[Idle] Failed to start listeners: {e}")
-
-    def ensure_alive(self):
-        """Re-arm input listeners if they've died (Windows/Linux only).
-
-        pynput listeners run on background threads that can silently die after
-        OS sleep/wake, RDP reconnects, or fast user switching on Windows. When
-        that happens last_input_time freezes and idle detection breaks. This
-        checks the listener threads and restarts them if any are dead.
-        No-op on macOS (no listeners) and where pynput is unavailable.
-        """
-        if IS_MACOS or not PYNPUT_AVAILABLE:
-            return
-        alive = bool(self._listeners) and all(
-            getattr(l, 'running', False) and getattr(l, 'is_alive', lambda: False)()
-            for l in self._listeners
-        )
-        if alive:
-            return
-        print("[Idle] Listener(s) not alive — restarting.")
-        # Stop any stragglers, then re-arm from a clean slate.
-        for l in self._listeners:
+        if PYNPUT_AVAILABLE and not IS_MACOS:
             try:
-                l.stop()
-            except Exception:
-                pass
-        self._listeners = []
-        self._started = False
-        self.last_input_time = time.time()
-        self.start()
+                self._kb_listener = keyboard.Listener(on_press=self._on_input)
+                self._ms_listener = mouse.Listener(on_move=self._on_input,
+                                                   on_click=self._on_input,
+                                                   on_scroll=self._on_input)
+                self._kb_listener.start()
+                self._ms_listener.start()
+                print("[Idle] Detector started (pynput)")
+            except Exception as e:
+                print(f"[Idle] pynput start failed: {e}")
 
-    def get_idle_seconds(self):
-        if not self._started:
-            return 0.0
-        if IS_MACOS:
-            # System-wide seconds since the last HID input event.
-            # Safe to call from any thread.
+    def stop(self):
+        self._running = False
+        if self._kb_listener:
+            try: self._kb_listener.stop()
+            except Exception: pass
+        if self._ms_listener:
+            try: self._ms_listener.stop()
+            except Exception: pass
+        self._kb_listener = None
+        self._ms_listener = None
+
+    def seconds_idle(self) -> float:
+        if IS_MACOS and MACOS_IDLE_AVAILABLE:
             try:
                 return float(CGEventSourceSecondsSinceLastEventType(
-                    kCGEventSourceStateHIDSystemState,
-                    kCGAnyInputEventType,
-                ))
+                    kCGEventSourceStateHIDSystemState, kCGAnyInputEventType))
             except Exception:
-                return 0.0
-        return time.time() - self.last_input_time
+                pass
+        return time.time() - self._last_input
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SCREENSHOT MONITOR
+# ─────────────────────────────────────────────────────────────────────────────
 class ScreenshotMonitor:
     def __init__(self):
-        # Cross-platform config directory
-        self.config_dir = self._get_config_dir()
-        self.config_file = self.config_dir / 'config.json'
-        self.queue_file = self.config_dir / 'queue.json'
-        
-        print(f"[Config] Config directory: {self.config_dir}")
-        print(f"[Config] Config file: {self.config_file}")
-        
-        # Create config directory with proper permissions
-        self._ensure_config_dir()
-        
-        # State
-        self.is_monitoring = False
-        self.is_paused = False
-        self.session_active = False
+        # ── Auth ──────────────────────────────────────────────────────────
         self.credentials = None
-        self.upload_queue = []
+        self._config_dir  = Path.home() / '.config' / 'GHV-Monitor'
+        self._config_file = self._config_dir / 'config.json'
+        self._config_dir.mkdir(parents=True, exist_ok=True)
+        self._load_credentials()
 
-        # Idle detection state
-        self.idle_detector = IdleDetector()
-        self.is_idle = False  # True between sending 'start' and 'end' events
-        self.last_capture_success = None  # unix ts of last successful capture (watchdog)
-        self._capture_job = None  # schedule job reference for dynamic rescheduling
-        self.on_update_required = None  # callback(min_version: str) when server demands upgrade
-        self.server_capture_disabled = False  # True when admin turned off capture for this user
-        
-        # Load saved data
-        self.load_config()
-        self.load_queue()
-        
-        # Callbacks for UI
-        self.on_status_changed = None
-        self.on_screenshot_captured = None
-    
-    def _get_config_dir(self):
-        """Get cross-platform config directory"""
-        if sys.platform == 'win32':
-            # Windows: Use APPDATA or fallback to USERPROFILE
-            app_data = os.environ.get('APPDATA')
-            if app_data:
-                return Path(app_data) / 'GHV-Monitor'
-            user_profile = os.environ.get('USERPROFILE')
-            if user_profile:
-                return Path(user_profile) / 'GHV-Monitor'
-            return Path.home() / 'GHV-Monitor'
-        else:
-            # Linux/macOS: Use ~/.config/GHV-Monitor (XDG standard) or fallback to ~/.ghv-monitor
-            xdg_config = os.environ.get('XDG_CONFIG_HOME')
-            if xdg_config:
-                return Path(xdg_config) / 'GHV-Monitor'
-            return Path.home() / '.config' / 'GHV-Monitor'
-    
-    def _ensure_config_dir(self):
-        """Create config directory with error handling"""
+        # ── Clock / shift state (synced from status.php) ──────────────────
+        self.is_monitoring     = False
+        self.is_paused         = False
+        self.is_idle           = False
+        self.server_capture_disabled = False
+
+        # Values refreshed from status.php on each sync
+        self.clocked_in    = False
+        self.on_lunch      = False
+        self.clock_in_time = None   # UTC ISO string e.g. "2026-09-07 09:50:00"
+        self.lunch_out_time= None
+
+        self.upload_queue       = []
+        self.last_capture_success = None
+        self._capture_job       = None
+        self.on_update_required = None
+
+        # ── Callbacks (all called from bg thread → marshal in GUI) ────────
+        self.on_status_changed     = None
+        self.on_screenshot_captured= None
+        self.on_idle_started       = None   # NEW — VA went idle
+        self.on_idle_ended         = None   # NEW — VA returned from idle
+
+        # ── Sub-systems ───────────────────────────────────────────────────
+        self.idle_detector    = IdleDetector()
+        self.activity_tracker = ActivityTracker()
+
+        self._load_queue()
+
+    # ── Config / credentials ─────────────────────────────────────────────
+    def _load_credentials(self):
+        print(f"[Config] Config directory: {self._config_dir}")
+        print(f"[Config] Config file: {self._config_file}")
         try:
-            # Create with parents=True, exist_ok=True
-            self.config_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Verify it exists and is writable
-            if not self.config_dir.exists():
-                raise RuntimeError(f"Failed to create directory: {self.config_dir}")
-            
-            # Test write permission by creating a test file
-            test_file = self.config_dir / '.write_test'
-            try:
-                test_file.write_text('test')
-                test_file.unlink()  # Clean up
-                print(f"[Config] Directory verified and writable: {self.config_dir}")
-            except Exception as e:
-                print(f"[Config] Directory not writable: {e}")
-                raise
-                
+            self._config_dir.mkdir(parents=True, exist_ok=True)
+            print(f"[Config] Directory verified and writable: {self._config_dir}")
         except Exception as e:
-            print(f"[Config] ERROR creating directory: {e}")
-            # Fallback: use temp directory
-            import tempfile
-            fallback = Path(tempfile.gettempdir()) / 'GHV-Monitor'
-            print(f"[Config] Using fallback: {fallback}")
-            fallback.mkdir(parents=True, exist_ok=True)
-            self.config_dir = fallback
-            self.config_file = self.config_dir / 'config.json'
-            self.queue_file = self.config_dir / 'queue.json'
-    
-    def load_config(self):
-        """Load saved configuration"""
-        print(f"[Config] Loading from: {self.config_file}")
-        print(f"[Config] File exists: {self.config_file.exists()}")
-        
-        if self.config_file.exists():
+            print(f"[Config] Warning: could not create config dir: {e}")
+        print(f"[Config] Loading from: {self._config_file}")
+        if self._config_file.exists():
+            print(f"[Config] File exists: True")
             try:
-                content = self.config_file.read_text(encoding='utf-8')
+                content = self._config_file.read_text(encoding='utf-8')
                 print(f"[Config] File content length: {len(content)}")
                 data = json.loads(content)
-                self.credentials = data.get('credentials')
-                print(f"[Config] Loaded credentials: {self.credentials is not None}")
-                if self.credentials:
-                    print(f"[Config] Username: {self.credentials.get('username', 'N/A')}")
+                if data.get('username') and data.get('password'):
+                    self.credentials = data
+                    print(f"[Config] Loaded credentials: True")
+                    print(f"[Config] Username: {data['username']}")
+                else:
+                    print("[Config] Credentials incomplete")
             except Exception as e:
-                print(f"[Config] Error loading config: {e}")
-                self.credentials = None
+                print(f"[Config] Failed to load: {e}")
         else:
+            print("[Config] File exists: False")
             print("[Config] No config file found")
-            self.credentials = None
-    
-    def save_config(self):
-        """Save configuration - FORCE WRITE"""
-        print(f"[Config] Saving to: {self.config_file}")
-        print(f"[Config] Current credentials: {self.credentials}")
-        
+
+    def _save_credentials(self, username, password):
+        data = {'username': username, 'password': password}
+        tmp  = self._config_file.with_suffix('.tmp')
         try:
-            # Ensure directory exists
-            self.config_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Write atomically: temp file then rename
-            temp_file = self.config_file.with_suffix('.tmp')
-            data = {'credentials': self.credentials}
-            
-            # Write to temp file
-            temp_file.write_text(json.dumps(data, indent=2), encoding='utf-8')
-            print(f"[Config] Temp file written: {temp_file}")
-            
-            # Rename to final (atomic on most systems)
-            temp_file.replace(self.config_file)
-            print(f"[Config] Renamed to: {self.config_file}")
-            
-            # Verify
-            if self.config_file.exists():
-                verify = self.config_file.read_text(encoding='utf-8')
-                print(f"[Config] Verified write: {len(verify)} bytes")
-                print("[Config] Saved successfully")
-            else:
-                print("[Config] CRITICAL: File not found after save!")
-                
+            print(f"[Config] Saving to: {self._config_file}")
+            print(f"[Config] Current credentials: {data}")
+            tmp.write_text(json.dumps(data), encoding='utf-8')
+            print(f"[Config] Temp file written: {tmp}")
+            tmp.rename(self._config_file)
+            print(f"[Config] Renamed to: {self._config_file}")
+            print(f"[Config] Verified write: {len(self._config_file.read_text())} bytes")
+            print("[Config] Saved successfully")
         except Exception as e:
-            print(f"[Config] ERROR saving config: {e}")
-            import traceback
-            traceback.print_exc()
-    
-    def clear_saved_credentials(self):
-        """Remove saved credentials when login fails"""
-        print("[Config] Clearing saved credentials")
+            print(f"[Config] Failed to save: {e}")
+
+    def _clear_credentials(self):
         self.credentials = None
         try:
-            if self.config_file.exists():
-                self.config_file.unlink()
-                print("[Config] Config file deleted")
-        except Exception as e:
-            print(f"[Config] Error clearing config: {e}")
-    
-    def load_queue(self):
-        if self.queue_file.exists():
+            if self._config_file.exists():
+                self._config_file.unlink()
+        except Exception:
+            pass
+
+    def _load_queue(self):
+        qf = self._config_dir / 'queue.json'
+        if qf.exists():
             try:
-                with open(self.queue_file, 'r', encoding='utf-8') as f:
-                    self.upload_queue = json.load(f)
+                self.upload_queue = json.loads(qf.read_text(encoding='utf-8'))
                 print(f"[Queue] Loaded {len(self.upload_queue)} items")
-            except Exception as e:
-                print(f"[Queue] Error loading queue: {e}")
-    
-    def save_queue(self):
+            except Exception:
+                pass
+
+    def _save_queue(self):
         try:
-            self.config_dir.mkdir(parents=True, exist_ok=True)
-            with open(self.queue_file, 'w', encoding='utf-8') as f:
-                json.dump(self.upload_queue, f)
+            qf = self._config_dir / 'queue.json'
+            qf.write_text(json.dumps(self.upload_queue), encoding='utf-8')
+        except Exception:
+            pass
+
+    # ── Auth header ──────────────────────────────────────────────────────
+    def _auth_headers(self):
+        if not self.credentials:
+            return {}
+        creds = f"{self.credentials['username']}:{self.credentials['password']}"
+        return {'Authorization': f'Bearer {creds}'}
+
+    # ── Login ────────────────────────────────────────────────────────────
+    def login(self, username, password):
+        try:
+            print(f"[Login] Attempting login for {username}...")
+            print(f"[Login] URL: {CONFIG['STATUS_URL']}")
+            creds = f"{username}:{password}"
+            resp  = requests.post(
+                CONFIG['STATUS_URL'],
+                json={'username': username, 'password': password},
+                headers={'Authorization': f'Bearer {creds}'},
+                timeout=(10, 30)
+            )
+            print(f"[Login] Response code: {resp.status_code}")
+            data = resp.json()
+            print(f"[Login] Response: {data}")
+            if data.get('success'):
+                self.credentials = {'username': username, 'password': password}
+                self._save_credentials(username, password)
+                return {'success': True}
+            return {'success': False, 'message': data.get('message', 'Invalid credentials')}
         except Exception as e:
-            print(f"[Queue] Error saving queue: {e}")
-    
+            print(f"[Login] Error: {e}")
+            return {'success': False, 'message': 'Connection error. Check your internet.'}
+
+    def logout(self):
+        self.stop_monitoring()
+        self._clear_credentials()
+
+    # ── Clock action (NEW) ────────────────────────────────────────────────
+    def clock_action(self, action):
+        """
+        Sends a clock action (clock_in/clock_out/lunch_out/lunch_in)
+        to the hub via the new Bearer-auth clock API endpoint.
+        Returns {'success': bool, 'message': str}.
+        """
+        if not self.credentials:
+            return {'success': False, 'message': 'Not logged in'}
+        try:
+            print(f"[Clock] Sending action: {action}")
+            resp = requests.post(
+                CONFIG['CLOCK_URL'],
+                json={'action': action},
+                headers={**self._auth_headers(), 'Content-Type': 'application/json'},
+                timeout=(10, 30)
+            )
+            data = resp.json()
+            print(f"[Clock] Response: {data}")
+            if data.get('success'):
+                # Immediately sync so UI reflects new state
+                self.sync_with_tracker()
+            return data
+        except Exception as e:
+            print(f"[Clock] Error: {e}")
+            return {'success': False, 'message': f'Connection error: {e}'}
+
+    # ── Screen capture ───────────────────────────────────────────────────
     def capture_screenshot(self):
         try:
             print("[Screenshot] Capturing desktop...")
 
+            # ── Screen Recording permission preflight (macOS) ────────────
             if IS_MACOS:
-                # mss produces blank images on macOS Tahoe 26+ due to a
-                # CGDisplayCreateImageForRect compositing change. Use the
-                # built-in `screencapture` CLI instead — it honours Screen
-                # Recording permission and works on every macOS version.
-                import tempfile, subprocess, os as _os
-
-                # ── Screen Recording permission preflight ──
-                # Definitive check of whether THIS process (at its current
-                # path/signature) holds the TCC Screen Recording grant.
-                # Wallpaper-only captures + "could not create image from
-                # display" both trace back to this being False. If missing,
-                # CGRequestScreenCaptureAccess fires the system prompt /
-                # deep-links the user to the right Settings pane.
                 try:
                     from Quartz import (CGPreflightScreenCaptureAccess,
                                         CGRequestScreenCaptureAccess)
@@ -453,25 +389,22 @@ class ScreenshotMonitor:
                     print(f"[Permission] Screen Recording access: {_has_perm}")
                     if not _has_perm:
                         print(f"[Permission] Running from: {sys.executable}")
-                        print("[Permission] MISSING — requesting access "
-                              "(user must grant in System Settings, then "
-                              "FULLY QUIT and reopen this app)")
+                        print("[Permission] MISSING — requesting access")
                         CGRequestScreenCaptureAccess()
                 except ImportError:
-                    print("[Permission] Preflight API unavailable in this "
-                          "Quartz build — skipping check")
-                except Exception as _perm_err:
-                    print(f"[Permission] Preflight check failed: {_perm_err}")
+                    pass
+                except Exception as e:
+                    print(f"[Permission] Check failed: {e}")
 
+            if IS_MACOS:
+                import tempfile, subprocess, os as _os
                 img = None
                 with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as _f:
                     _tmp = _f.name
                 try:
-                    # GUI-launched apps get a minimal PATH; use the absolute
-                    # binary path so we never depend on PATH resolution.
                     _bin = '/usr/sbin/screencapture'
                     if not _os.path.exists(_bin):
-                        _bin = 'screencapture'  # fall back to PATH lookup
+                        _bin = 'screencapture'
                     _res = subprocess.run(
                         [_bin, '-x', '-t', 'png', _tmp],
                         capture_output=True, timeout=15
@@ -483,172 +416,149 @@ class ScreenshotMonitor:
                         print("[Screenshot] screencapture produced empty file")
                     else:
                         img = Image.open(_tmp).convert('RGB')
-                except Exception as _sc_err:
-                    print(f"[Screenshot] screencapture failed: {_sc_err}")
+                except Exception as e:
+                    print(f"[Screenshot] screencapture failed: {e}")
                 finally:
-                    try:
-                        _os.unlink(_tmp)
-                    except OSError:
-                        pass
-
+                    try: _os.unlink(_tmp)
+                    except OSError: pass
                 if img is None:
-                    # Last-resort fallback: mss. On pre-Tahoe this is fully
-                    # correct; on Tahoe it may produce a blank frame, but a
-                    # blank upload still proves the pipeline works end-to-end
-                    # (and is visible in the hub), which beats silence.
                     print("[Screenshot] Falling back to mss")
                     with mss.mss() as sct:
-                        monitor = sct.monitors[0]
-                        screenshot = sct.grab(monitor)
+                        screenshot = sct.grab(sct.monitors[0])
                         img = Image.frombytes('RGB', screenshot.size, screenshot.rgb)
             else:
-                # Windows / Linux — mss works fine
                 with mss.mss() as sct:
-                    monitor = sct.monitors[0]
-                    screenshot = sct.grab(monitor)
+                    screenshot = sct.grab(sct.monitors[0])
                     img = Image.frombytes('RGB', screenshot.size, screenshot.rgb)
 
             if img.width > CONFIG['MAX_IMAGE_WIDTH']:
-                ratio = CONFIG['MAX_IMAGE_WIDTH'] / img.width
-                new_height = int(img.height * ratio)
-                img = img.resize((CONFIG['MAX_IMAGE_WIDTH'], new_height),
-                                 Image.Resampling.LANCZOS)
-
-            buffer = BytesIO()
-            img.save(buffer, format='JPEG', quality=CONFIG['IMAGE_QUALITY'])
-            img_bytes = buffer.getvalue()
-
+                ratio  = CONFIG['MAX_IMAGE_WIDTH'] / img.width
+                img    = img.resize((CONFIG['MAX_IMAGE_WIDTH'], int(img.height * ratio)),
+                                    Image.Resampling.LANCZOS)
+            buf = BytesIO()
+            img.save(buf, format='JPEG', quality=CONFIG['IMAGE_QUALITY'])
+            img_bytes = buf.getvalue()
             print(f"[Screenshot] Captured ({len(img_bytes)} bytes)")
             return img_bytes
         except Exception as e:
             print(f"[Screenshot] Error: {e}")
-            import traceback
-            traceback.print_exc()
             raise
-    
+
+    # ── Upload screenshot ────────────────────────────────────────────────
     def upload_screenshot(self, image_bytes):
         try:
-            if not self.credentials:
-                raise Exception("Not logged in")
-            
-            base64_image = base64.b64encode(image_bytes).decode('utf-8')
-            
             print("[Upload] Uploading screenshot...")
-            
-            response = requests.post(
+            resp = requests.post(
                 CONFIG['UPLOAD_URL'],
-                json={
-                    'screenshot': base64_image,
-                    'timestamp': datetime.now().isoformat()
-                },
-                headers={
-                    'Content-Type': 'application/json',
-                    'Authorization': f"Bearer {self.credentials['username']}:{self.credentials['password']}"
-                },
-                # Screenshot uploads are ~150-300KB; allow generous read time
-                # on slow connections, especially Windows after sleep/wake.
+                data=base64.b64encode(image_bytes).decode(),
+                headers={**self._auth_headers(), 'Content-Type': 'text/plain'},
                 timeout=(15, 60)
             )
-            
-            print(f"[Upload] Response code: {response.status_code}")
-            
-            if response.status_code == 200:
-                data = response.json()
-                if data.get('success'):
-                    print(f"[Upload] Success")
-                    return {'success': True, 'data': data}
-                else:
-                    raise Exception(data.get('message', 'Upload failed'))
-            elif response.status_code == 401:
-                print("[Upload] Session expired")
-                self.stop_monitoring()
-                return {'session_expired': True}
-            else:
-                raise Exception(f"HTTP {response.status_code}: {response.text}")
-                
+            print(f"[Upload] Response code: {resp.status_code}")
+            if resp.status_code == 200:
+                print("[Upload] Success")
+                return True
+            print(f"[Upload] Failed: {resp.text[:200]}")
+            return False
         except Exception as e:
             print(f"[Upload] Error: {e}")
-            raise
-    
-    def check_status(self):
-        """Check status with the server.
+            return False
 
-        Returns:
-            dict with at least 'active' key — server's response
-            None — could not determine (network error, timeout, transient 5xx);
-                   caller should KEEP current state, not transition
-            {'auth_failed': True} — credentials rejected (401); caller should
-                                   stop and prompt re-login
-        """
+    # ── Activity flush (NEW) ─────────────────────────────────────────────
+    def flush_activity(self):
+        """Send buffered activity logs to the server."""
+        if not self.credentials:
+            return
+        logs = self.activity_tracker.flush()
+        if not logs:
+            return
         try:
-            if not self.credentials:
-                return None  # No credentials = nothing to check
+            resp = requests.post(
+                CONFIG['ACTIVITY_URL'],
+                json={'logs': logs},
+                headers={**self._auth_headers(), 'Content-Type': 'application/json'},
+                timeout=(10, 30)
+            )
+            print(f"[Activity] Flushed {len(logs)} logs → {resp.status_code}")
+        except Exception as e:
+            print(f"[Activity] Flush error: {e}")
 
-            response = requests.get(
+    # ── Status sync ──────────────────────────────────────────────────────
+    def check_status(self):
+        try:
+            resp = requests.get(
                 CONFIG['STATUS_URL'],
-                headers={
-                    'Authorization': f"Bearer {self.credentials['username']}:{self.credentials['password']}"
-                },
-                # (connect_timeout, read_timeout) — generous for Windows
-                # network stack quirks and sleep/wake recovery
+                headers=self._auth_headers(),
                 timeout=(15, 30)
             )
-
-            if response.status_code == 200:
-                try:
-                    return response.json()
-                except ValueError as e:
-                    print(f"[Status] Server returned non-JSON 200: {e}")
-                    return None  # Transient — server hiccup
-
-            if response.status_code == 401:
-                print("[Status] Authentication rejected (401)")
-                return {'auth_failed': True}
-
-            # Any other status (5xx, 502, 503, 504, etc.) is transient
-            print(f"[Status] Transient HTTP {response.status_code} — keeping current state")
-            return None
-
-        except requests.exceptions.Timeout:
-            print("[Status] Request timed out — keeping current state")
-            return None
-        except requests.exceptions.ConnectionError as e:
-            # Most common Windows failure mode — DNS, reset, refused
-            print(f"[Status] Connection error — keeping current state: {e}")
+            if resp.status_code == 200:
+                return resp.json()
+            elif resp.status_code == 401:
+                return {'success': False, 'error': 'auth_failed',
+                        'session_expired': resp.json().get('session_expired', False),
+                        'reason': resp.json().get('reason', '')}
             return None
         except Exception as e:
-            print(f"[Status] Unexpected error — keeping current state: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"[Status] Request error: {e}")
             return None
-    
-    def sync_with_tracker(self):
+
+    @staticmethod
+    def _parse_version(v: str):
         try:
-            print("[Sync] Checking status...")
+            return tuple(int(x) for x in v.lstrip('v').split('.'))
+        except (ValueError, AttributeError):
+            return (0, 0, 0)
+
+    def _reschedule_capture(self, new_interval_minutes):
+        if not self.is_monitoring:
+            CONFIG['CAPTURE_INTERVAL_MINUTES'] = new_interval_minutes
+            return
+        if new_interval_minutes == CONFIG['CAPTURE_INTERVAL_MINUTES']:
+            if self._capture_job is not None and self._capture_job in schedule.jobs:
+                return
+            print(f"[Monitor] Capture job missing, recreating at {new_interval_minutes}m")
+        print(f"[Monitor] Capture interval: "
+              f"{CONFIG['CAPTURE_INTERVAL_MINUTES']}m → {new_interval_minutes}m")
+        CONFIG['CAPTURE_INTERVAL_MINUTES'] = new_interval_minutes
+        if self._capture_job is not None:
+            schedule.cancel_job(self._capture_job)
+            self._capture_job = None
+        self._capture_job = schedule.every(new_interval_minutes).minutes.do(
+            self.capture_and_upload)
+        print(f"[Monitor] Rescheduled capture every {new_interval_minutes}m")
+
+    def sync_with_tracker(self):
+        print("[Sync] Checking status...")
+        try:
             status = self.check_status()
-
-            # status is None when we couldn't determine — keep current state.
-            # This prevents transient network failures from flipping the app
-            # into "offline waiting for clockin" state.
             if status is None:
-                print("[Sync] Could not determine status — keeping current state")
+                print("[Sync] No response — keeping current state")
                 return
 
-            # Auth was rejected. Stop monitoring and let user re-login.
-            if status.get('auth_failed'):
-                print("[Sync] Auth failed — stopping monitoring, credentials need refresh")
-                if self.is_monitoring:
-                    self.stop_monitoring()
-                # Don't auto-clear credentials here — let the user see the
-                # login screen and decide; clearing silently is worse UX.
+            if not status.get('success'):
+                if status.get('session_expired') or status.get('error') == 'auth_failed':
+                    reason = status.get('reason', '')
+                    if reason == 'force_logout':
+                        print("[Sync] Force logout — clearing credentials")
+                        self._clear_credentials()
+                    if self.is_monitoring:
+                        self.stop_monitoring()
+                    if self.on_status_changed:
+                        self.on_status_changed()
                 return
 
-            print(f"[Sync] Status: active={status.get('active')}, clocked_in={status.get('clocked_in')}, on_lunch={status.get('on_lunch')}")
+            print(f"[Sync] Status: active={status.get('active')}, "
+                  f"clocked_in={status.get('clocked_in')}, "
+                  f"on_lunch={status.get('on_lunch')}")
 
-            # ── Apply server-side capture interval override ───────────────────
-            # The server returns capture_interval_minutes based on per-user
-            # screenshot_settings overrides (or the global default).
-            # Apply it live so the per-user override actually takes effect.
+            # ── Update shift state for GUI ─────────────────────────────
+            self.clocked_in     = bool(status.get('clocked_in'))
+            self.on_lunch       = bool(status.get('on_lunch'))
+            self.clock_in_time  = status.get('clock_in_time_utc') or status.get('clock_in_time')
+            self.lunch_out_time = status.get('lunch_out_time')
+            self.server_capture_disabled = (status.get('reason') == 'disabled')
+
+            # ── Capture interval override ──────────────────────────────
             srv_interval = status.get('capture_interval_minutes')
             try:
                 srv_interval = int(float(srv_interval)) if srv_interval is not None else None
@@ -656,159 +566,102 @@ class ScreenshotMonitor:
                 srv_interval = None
             if srv_interval and srv_interval > 0:
                 self._reschedule_capture(srv_interval)
-            # ─────────────────────────────────────────────────────────────────
 
-            # ── Honor server-side capture_enabled / is_enabled toggles ────────
-            # status.php sets reason='disabled' when the admin has turned off
-            # capture (global default's "Capture enabled"/"System enabled", or
-            # this user's specific override toggles). Without this, those
-            # checkboxes on the settings page had zero effect on the app.
-            self.server_capture_disabled = (status.get('reason') == 'disabled')
-            # ─────────────────────────────────────────────────────────────────
-
-            # ── Force-update check ────────────────────────────────────────────
-            # The server broadcasts min_app_version on every sync.
-            # If the running build is older, fire on_update_required so the
-            # GUI can block usage until the user installs the new build.
+            # ── Force-update check ─────────────────────────────────────
             min_ver = status.get('min_app_version', '').strip()
             if min_ver and self._parse_version(min_ver) > self._parse_version(VERSION):
                 print(f"[Update] Server requires {min_ver}, running {VERSION}")
                 if self.on_update_required:
                     self.on_update_required(min_ver)
-            # ─────────────────────────────────────────────────────────────────
 
+            # ── Monitoring state ───────────────────────────────────────
             if status.get('active') and status.get('clocked_in') and not status.get('on_lunch'):
                 if not self.is_monitoring:
                     print("[Sync] Starting monitoring (clocked in)")
                     self.start_monitoring()
                 elif self.is_paused:
-                    print("[Sync] Resuming monitoring (back from lunch)")
                     self.resume_monitoring()
-            elif status.get('active') and status.get('on_lunch'):
+            elif status.get('on_lunch'):
                 if self.is_monitoring and not self.is_paused:
-                    print("[Sync] Pausing monitoring (on lunch)")
                     self.pause_monitoring()
             else:
-                # Server confirmed: NOT clocked in. This is the only path that
-                # stops monitoring on a "clocked out" signal — and it requires
-                # a successful, parseable HTTP 200 response that said so.
                 if self.is_monitoring:
                     print("[Sync] Stopping monitoring (server confirmed clocked out)")
                     self.stop_monitoring()
 
-            self.session_active = status.get('active', False)
+            if self.on_status_changed:
+                self.on_status_changed()
+
         except Exception as e:
-            print(f"[Sync] Error: {e}")
+            print(f"[Sync] Unexpected error: {e}")
             import traceback
             traceback.print_exc()
 
-    def send_idle_event(self, event_type, when_utc):
-        """POST an idle 'start' or 'end' event to the server.
-
-        when_utc: a timezone-aware datetime in UTC
-        """
+    # ── Idle events ──────────────────────────────────────────────────────
+    def send_idle_event(self, event_type, ts):
         if not self.credentials:
             return
         try:
-            timestamp = when_utc.strftime('%Y-%m-%d %H:%M:%S')
-            response = requests.post(
-                CONFIG['IDLE_URL'],
-                json={
-                    'event': event_type,        # 'start' or 'end'
-                    'timestamp': timestamp,     # UTC, MySQL DATETIME format
-                    'idle_type': 'idle',
-                },
-                headers={
-                    'Content-Type': 'application/json',
-                    'Authorization': f"Bearer {self.credentials['username']}:{self.credentials['password']}",
-                },
-                timeout=10,
-            )
-            if response.status_code == 200:
-                print(f"[Idle] {event_type} event sent (timestamp UTC: {timestamp})")
-            else:
-                print(f"[Idle] {event_type} event failed: HTTP {response.status_code} — {response.text[:200]}")
+            payload = {
+                'event':     event_type,
+                'timestamp': ts.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                'idle_type': 'idle',
+            }
+            requests.post(CONFIG['IDLE_URL'],
+                          json=payload,
+                          headers={**self._auth_headers(),
+                                   'Content-Type': 'application/json'},
+                          timeout=(10, 30))
+            print(f"[Idle] {event_type} event sent (timestamp UTC: "
+                  f"{ts.strftime('%Y-%m-%d %H:%M:%S')})")
         except Exception as e:
-            print(f"[Idle] Error sending {event_type}: {e}")
+            print(f"[Idle] Event send error: {e}")
 
     def check_idle(self):
-        """Periodic idle-state check — runs every IDLE_CHECK_INTERVAL_SECONDS.
-
-        Transitions:
-          - not idle → idle: when idle_seconds crosses the threshold
-          - idle → not idle: when idle_seconds drops back below the threshold
-        """
-        if not self.is_monitoring or self.is_paused:
-            return
-        if not IDLE_AVAILABLE:
-            return
-
-        idle_seconds = self.idle_detector.get_idle_seconds()
-        threshold = CONFIG['IDLE_DETECTION_THRESHOLD_SECONDS']
-        ceiling = CONFIG['IDLE_SANITY_CEILING_SECONDS']
-
-        # ── SAFETY: untrustworthy idle detector ──
-        # If reported idle exceeds the sanity ceiling, the input listener has
-        # almost certainly frozen (dead pynput hook after sleep/wake / RDP on
-        # Windows), which would otherwise latch is_idle=True forever and stop
-        # all captures silently. Treat it as not-idle, reset the detector's
-        # clock so it can recover, and try to restart listeners.
-        if idle_seconds >= ceiling:
-            print(f"[Idle] Reported idle {int(idle_seconds)}s exceeds ceiling "
-                  f"{ceiling}s — detector likely frozen. Forcing not-idle + recovery.")
-            if self.is_idle:
-                self.is_idle = False
-                self.send_idle_event('end', datetime.now(timezone.utc))
-            # Reset the baseline so get_idle_seconds() returns ~0 again.
-            self.idle_detector.last_input_time = time.time()
-            # Best-effort: re-arm listeners if they died (no-op on macOS).
-            try:
-                self.idle_detector.ensure_alive()
-            except Exception as e:
-                print(f"[Idle] ensure_alive failed: {e}")
-            return
-
-        if idle_seconds >= threshold and not self.is_idle:
-            # User became idle. The actual start was `idle_seconds` ago.
-            idle_start_utc = datetime.now(timezone.utc) - timedelta(seconds=int(idle_seconds))
-            print(f"[Idle] User went idle ({int(idle_seconds)}s since last input)")
-            self.is_idle = True
-            self.send_idle_event('start', idle_start_utc)
-
-        elif idle_seconds < threshold and self.is_idle:
-            # User returned to activity. End event timestamp = now.
-            print(f"[Idle] User returned to activity")
-            self.is_idle = False
-            self.send_idle_event('end', datetime.now(timezone.utc))
-    
-    def capture_watchdog(self):
-        """Safety net: if captures have silently stopped while we still think
-        we're monitoring, force one and self-heal. Catches frozen idle state,
-        a missed schedule, or any other stall that doesn't raise."""
-        if not self.is_monitoring or self.is_paused:
-            return
-        if self.server_capture_disabled:
-            return
-        interval = CONFIG['CAPTURE_INTERVAL_MINUTES'] * 60
-        # Allow 2x the interval before we consider it stalled.
-        max_gap = interval * 2 + 30
-        last = self.last_capture_success or 0
-        gap = time.time() - last
-        if gap < max_gap:
-            return
-        print(f"[Watchdog] No successful capture in {int(gap)}s "
-              f"(limit {max_gap}s) — forcing recovery.")
-        # If idle state is stuck, clear it so the forced capture goes through.
         try:
-            idle_now = self.idle_detector.get_idle_seconds()
-            if self.is_idle and idle_now >= CONFIG['IDLE_SANITY_CEILING_SECONDS']:
+            if not self.is_monitoring:
+                return
+            idle_now = self.idle_detector.seconds_idle()
+            threshold = CONFIG['IDLE_DETECTION_THRESHOLD_SECONDS']
+            ceiling   = CONFIG['IDLE_SANITY_CEILING_SECONDS']
+
+            if idle_now < threshold and self.is_idle:
+                print(f"[Idle] User returned to activity")
                 self.is_idle = False
-                self.idle_detector.last_input_time = time.time()
-                self.idle_detector.ensure_alive()
+                ts = datetime.now(timezone.utc)
+                self.send_idle_event('end', ts)
+                if self.on_idle_ended:
+                    self.on_idle_ended()
+                if self.on_status_changed:
+                    self.on_status_changed()
+                return
+
+            if idle_now >= threshold and not self.is_idle:
+                if idle_now < ceiling:
+                    print(f"[Idle] User went idle ({idle_now:.0f}s since last input)")
+                    self.is_idle = True
+                    ts = datetime.now(timezone.utc) - timedelta(seconds=idle_now - threshold)
+                    self.send_idle_event('start', ts)
+                    if self.on_idle_started:
+                        self.on_idle_started(idle_now)
+                    if self.on_status_changed:
+                        self.on_status_changed()
         except Exception as e:
-            print(f"[Watchdog] idle recovery failed: {e}")
-        # Force a capture attempt now.
-        self.capture_and_upload()
+            print(f"[Idle] Check error: {e}")
+
+    # ── Capture and upload ───────────────────────────────────────────────
+    def capture_watchdog(self):
+        if not self.is_monitoring or self.is_paused or self.server_capture_disabled:
+            return
+        try:
+            interval  = CONFIG['CAPTURE_INTERVAL_MINUTES'] * 60
+            max_gap   = interval * 2 + 30
+            if (self.last_capture_success
+                    and (time.time() - self.last_capture_success) > max_gap):
+                print("[Watchdog] Capture seems stalled, forcing...")
+                threading.Thread(target=self.capture_and_upload, daemon=True).start()
+        except Exception as e:
+            print(f"[Watchdog] Error: {e}")
 
     def capture_and_upload(self):
         if not self.is_monitoring or self.is_paused:
@@ -818,276 +671,124 @@ class ScreenshotMonitor:
             print("[Capture] Skipping (admin disabled capture for this user)")
             return
         if self.is_idle:
-            # SAFETY: only honor the idle-skip if the idle reading is still
-            # plausible. If the detector reports an implausibly long idle, it
-            # has likely frozen (dead listener) — don't let that silently stop
-            # captures; proceed to capture and let check_idle recover state.
-            try:
-                idle_now = self.idle_detector.get_idle_seconds()
-            except Exception:
-                idle_now = 0
-            if idle_now < CONFIG['IDLE_SANITY_CEILING_SECONDS']:
-                print("[Capture] Skipping (user is idle)")
-                return
-            print(f"[Capture] is_idle set but idle reading {int(idle_now)}s is "
-                  f"implausible — capturing anyway (detector may be frozen).")
+            print("[Capture] Skipping (user is idle)")
+            return
         try:
             image_bytes = self.capture_screenshot()
-            result = self.upload_screenshot(image_bytes)
-            
-            if result.get('success'):
-                self.last_capture_success = time.time()
-                print(f"[Capture] Success — uploaded {len(image_bytes)} bytes")
-                self.process_queue()
-                if self.on_screenshot_captured:
-                    self.on_screenshot_captured('success')
-            else:
-                self.upload_queue.append({
-                    'image': base64.b64encode(image_bytes).decode('utf-8'),
-                    'timestamp': datetime.now().isoformat(),
-                    'retry_count': 0
-                })
-                self.save_queue()
-                
+            if image_bytes:
+                ok = self.upload_screenshot(image_bytes)
+                if ok:
+                    self.last_capture_success = time.time()
+                    print(f"[Capture] Success — uploaded {len(image_bytes)} bytes")
+                    if self.on_screenshot_captured:
+                        self.on_screenshot_captured('success')
+                else:
+                    self.upload_queue.append({
+                        'data': base64.b64encode(image_bytes).decode(),
+                        'retry_count': 0,
+                        'timestamp': datetime.now().isoformat()
+                    })
+                    self._save_queue()
+                    if self.on_screenshot_captured:
+                        self.on_screenshot_captured('queued')
         except Exception as e:
             print(f"[Capture] Error: {e}")
-            import traceback
-            traceback.print_exc()
             if self.on_screenshot_captured:
                 self.on_screenshot_captured('error')
-    
+
     def process_queue(self):
         if not self.upload_queue:
             return
-        
         print(f"[Queue] Processing {len(self.upload_queue)} items")
-        
         items_to_retry = []
-        
         for item in self.upload_queue:
             try:
-                image_bytes = base64.b64decode(item['image'])
-                result = self.upload_screenshot(image_bytes)
-                
-                if not result.get('success'):
+                image_bytes = base64.b64decode(item['data'])
+                ok = self.upload_screenshot(image_bytes)
+                if not ok:
                     item['retry_count'] = item.get('retry_count', 0) + 1
                     if item['retry_count'] < CONFIG['MAX_RETRY_ATTEMPTS']:
                         items_to_retry.append(item)
-                    else:
-                        print(f"[Queue] Max retries reached for item")
-                        
-            except Exception as e:
-                print(f"[Queue] Error: {e}")
+            except Exception:
                 item['retry_count'] = item.get('retry_count', 0) + 1
                 if item['retry_count'] < CONFIG['MAX_RETRY_ATTEMPTS']:
                     items_to_retry.append(item)
-        
         self.upload_queue = items_to_retry
-        self.save_queue()
-    
+        self._save_queue()
+
+    # ── Monitoring lifecycle ─────────────────────────────────────────────
     def start_monitoring(self):
         if self.is_monitoring:
             return
         print("[Monitor] Starting...")
         self.is_monitoring = True
-        self.is_paused = False
+        self.is_paused     = False
 
-        # ── CAPTURE FIRST ──
-        # Schedule the capture job BEFORE anything that could raise (the idle
-        # detector's Quartz init has failed on some macOS builds). If idle
-        # detection breaks, we lose idle tracking — but never screenshots.
-        self._capture_job = schedule.every(CONFIG['CAPTURE_INTERVAL_MINUTES']).minutes.do(self.capture_and_upload)
+        self._capture_job = schedule.every(
+            CONFIG['CAPTURE_INTERVAL_MINUTES']).minutes.do(self.capture_and_upload)
         threading.Timer(5.0, self.capture_and_upload).start()
         print(f"[Monitor] Capture job scheduled every {CONFIG['CAPTURE_INTERVAL_MINUTES']}m")
 
-        # Watchdog: catch the case where captures silently stop while the app
-        # still believes it's monitoring. Runs every minute; forces a capture
-        # if none has succeeded in 2× the capture interval.
         self.last_capture_success = time.time()
         schedule.every(1).minutes.do(self.capture_watchdog)
 
-        # ── Idle detection (best-effort) ──
         try:
             self.idle_detector.start()
             schedule.every(CONFIG['IDLE_CHECK_INTERVAL_SECONDS']).seconds.do(self.check_idle)
             print("[Monitor] Idle detection started")
         except Exception as e:
-            print(f"[Monitor] Idle detection failed to start (continuing without it): {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"[Monitor] Idle detection failed (continuing): {e}")
+
+        # Activity tracking
+        schedule.every(CONFIG['ACTIVITY_CHECK_SECONDS']).seconds.do(self.activity_tracker.check)
+        schedule.every(CONFIG['ACTIVITY_FLUSH_SECONDS']).seconds.do(self.flush_activity)
+        print("[Monitor] Activity tracking started")
 
         if self.on_status_changed:
             self.on_status_changed()
-
         print("[Monitor] Started")
-    
-    @staticmethod
-    def _parse_version(v: str):
-        """Convert 'v1.10.3' or '1.10.3' to a comparable tuple (1, 10, 3)."""
-        try:
-            return tuple(int(x) for x in v.lstrip('v').split('.'))
-        except (ValueError, AttributeError):
-            return (0, 0, 0)
-
-    def _reschedule_capture(self, new_interval_minutes):
-        """Update the capture interval live without restarting the app.
-        Called by sync_with_tracker when the server returns a different
-        capture_interval_minutes than the current CONFIG value.
-        """
-        if not self.is_monitoring:
-            # Will pick up the new CONFIG value when start_monitoring() is called.
-            CONFIG['CAPTURE_INTERVAL_MINUTES'] = new_interval_minutes
-            return
-
-        if new_interval_minutes == CONFIG['CAPTURE_INTERVAL_MINUTES']:
-            # Same interval — but verify the job is still alive in the scheduler.
-            # If capture_and_upload raised an unhandled exception, schedule may
-            # have silently dropped the job, causing non-override users to go
-            # dark while override users (who recreate the job on each reschedule)
-            # continue working fine.
-            if self._capture_job is not None and self._capture_job in schedule.jobs:
-                return  # job healthy, nothing to do
-            # Job is missing — fall through and recreate it.
-            print(f"[Monitor] Capture job missing, recreating at {new_interval_minutes}m")
-
-        print(f"[Monitor] Capture interval: "
-              f"{CONFIG['CAPTURE_INTERVAL_MINUTES']}m → {new_interval_minutes}m")
-
-        CONFIG['CAPTURE_INTERVAL_MINUTES'] = new_interval_minutes
-
-        if self._capture_job is not None:
-            schedule.cancel_job(self._capture_job)
-            self._capture_job = None
-
-        self._capture_job = schedule.every(new_interval_minutes).minutes.do(
-            self.capture_and_upload)
-        print(f"[Monitor] Rescheduled capture every {new_interval_minutes}m")
 
     def stop_monitoring(self):
         if not self.is_monitoring:
             return
         print("[Monitor] Stopping...")
-
-        # If we're currently in an idle period, close it server-side so the
-        # cron alert pipeline doesn't see an unbounded open period.
         if self.is_idle:
             self.send_idle_event('end', datetime.now(timezone.utc))
             self.is_idle = False
-
+        self.flush_activity()
         self.is_monitoring = False
-        self.is_paused = False
-        self._capture_job = None
+        self.is_paused     = False
+        self._capture_job  = None
         schedule.clear()
-        
         if self.on_status_changed:
             self.on_status_changed()
-        
         print("[Monitor] Stopped")
-    
+
     def pause_monitoring(self):
         if not self.is_monitoring or self.is_paused:
             return
-        
-        print("[Monitor] Pausing...")
+        print("[Monitor] Pausing (lunch)...")
         self.is_paused = True
-        
         if self.on_status_changed:
             self.on_status_changed()
-    
+
     def resume_monitoring(self):
         if not self.is_monitoring or not self.is_paused:
             return
-        
         print("[Monitor] Resuming...")
         self.is_paused = False
-        
         if self.on_status_changed:
             self.on_status_changed()
-    
-    def login(self, username, password):
-        """Login with credentials"""
-        try:
-            print(f"[Login] Attempting login for {username}...")
-            print(f"[Login] URL: {CONFIG['STATUS_URL']}")
-            
-            response = requests.post(
-                CONFIG['STATUS_URL'],
-                json={'username': username, 'password': password},
-                timeout=10
-            )
-            
-            print(f"[Login] Response code: {response.status_code}")
-            
-            if response.status_code == 200:
-                data = response.json()
-                print(f"[Login] Response: {data}")
-                
-                if data.get('success'):
-                    self.credentials = {'username': username, 'password': password}
-                    self.save_config()  # This should now work!
-                    
-                    self.sync_with_tracker()
-                    schedule.every(CONFIG['STATUS_CHECK_SECONDS']).seconds.do(self.sync_with_tracker)
-                    
-                    return {'success': True}
-                else:
-                    self.clear_saved_credentials()
-                    return {'success': False, 'message': data.get('message', 'Invalid credentials')}
-            else:
-                self.clear_saved_credentials()
-                return {'success': False, 'message': f'Server error: HTTP {response.status_code}'}
-                
-        except requests.exceptions.ConnectionError as e:
-            print(f"[Login] Connection error: {e}")
-            self.clear_saved_credentials()
-            return {'success': False, 'message': 'Connection failed. Check your internet connection.'}
-        except requests.exceptions.Timeout as e:
-            print(f"[Login] Timeout: {e}")
-            self.clear_saved_credentials()
-            return {'success': False, 'message': 'Connection timed out. Server may be down.'}
-        except Exception as e:
-            print(f"[Login] Error: {e}")
-            self.clear_saved_credentials()
-            return {'success': False, 'message': f'Error: {str(e)}'}
-    
-    def logout(self):
-        """Logout - clears everything"""
-        self.stop_monitoring()
-        self.credentials = None
-        self.clear_saved_credentials()
-        schedule.clear()
-    
+
+    # ── Scheduler loop ───────────────────────────────────────────────────
     def run_scheduler(self):
-        """Main scheduler loop. Must never die from an exception —
-        if it does, the app silently stops working while the tray icon
-        keeps showing the last-known state."""
         print("[Scheduler] Loop started")
-        consecutive_errors = 0
         while True:
             try:
                 schedule.run_pending()
-                consecutive_errors = 0
             except Exception as e:
-                consecutive_errors += 1
-                print(f"[Scheduler] Error in run_pending (#{consecutive_errors}): {e}")
-                import traceback
-                traceback.print_exc()
-                # Back off slightly on repeated failures, but never give up
-                if consecutive_errors > 10:
-                    time.sleep(5)
-            try:
-                time.sleep(1)
-            except Exception:
-                # Even sleep can fail in extreme edge cases (signal interrupts
-                # on Windows during sleep/wake). Don't let it kill us.
-                pass
+                print(f"[Scheduler] Error: {e}")
+            time.sleep(1)
 
-# Global instance
+
 monitor = ScreenshotMonitor()
-
-if __name__ == '__main__':
-    if monitor.credentials:
-        monitor.sync_with_tracker()
-        schedule.every(CONFIG['STATUS_CHECK_SECONDS']).seconds.do(monitor.sync_with_tracker)
-    
-    monitor.run_scheduler()
