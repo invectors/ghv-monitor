@@ -365,15 +365,15 @@ class ScreenshotMonitor:
         if not self.credentials:
             return {'success': False, 'message': 'Not logged in'}
         try:
-            print(f"[Clock] Sending action: {action}")
+            print(f"[Clock] Sending action: {action} → {CONFIG['CLOCK_URL']}")
             resp = requests.post(
                 CONFIG['CLOCK_URL'],
                 json={'action': action},
                 headers={**self._auth_headers(), 'Content-Type': 'application/json'},
                 timeout=(10, 30)
             )
+            print(f"[Clock] HTTP {resp.status_code} — {resp.text[:300]}")
             data = resp.json()
-            print(f"[Clock] Response: {data}")
             if data.get('success'):
                 # Immediately sync so UI reflects new state
                 self.sync_with_tracker()
