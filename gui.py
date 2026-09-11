@@ -553,16 +553,22 @@ class MonitorGUI:
         threading.Thread(target=_do, daemon=True).start()
 
     def _on_clock_result(self, result, btns):
-        if not result.get('success'):
-            if result.get('already_active'):
-                # Informational — shift is still running, just sync to correct state
-                # Don't show red error, just quietly refresh
+        if result.get('success'):
+            # Success — update UI immediately to reflect new state
+            self.update_status()
+        elif result.get('already_active'):
+            # Informational: shift is already running (e.g. after a restart).
+            # Don't show a red error — just refresh so the timer shows correctly.
+            self.update_status()
+        else:
+            # Real error — show the message, hold it for 3 seconds, THEN refresh.
+            # (Calling update_status() immediately here would overwrite the message.)
+            msg = result.get('message', 'Action failed — check your connection')
+            try:
+                self._status_sub.configure(text=f"⚠ {msg[:55]}", text_color=RED)
+            except Exception:
                 pass
-            else:
-                msg = result.get('message', 'Action failed')
-                self._status_sub.configure(text=f"⚠ {msg[:50]}", text_color=RED)
-                self.root.after(3000, lambda: self.update_status())
-        self.update_status()
+            self.root.after(3000, self.update_status)
 
     # ─────────────────────────────────────────────────────────────────────────
     # SCREENSHOT CALLBACK
