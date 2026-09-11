@@ -226,8 +226,15 @@ class ScreenshotMonitor:
         # Values refreshed from status.php on each sync
         self.clocked_in    = False
         self.on_lunch      = False
-        self.clock_in_time = None   # UTC ISO string e.g. "2026-09-07 09:50:00"
+        self.clock_in_time = None   # display string e.g. "9:50 AM"
+        self.clock_in_time_utc = None  # raw UTC e.g. "2026-09-07 09:50:00" — used for elapsed
         self.lunch_out_time= None
+
+        # Lunch budget (refreshed on every sync so app enforces without server round-trip)
+        self.lunch_used_seconds      = 0
+        self.lunch_limit_seconds     = 3600   # default 1 hr until first sync
+        self.lunch_remaining_seconds = 3600
+        self.lunch_exhausted         = False
 
         self.upload_queue       = []
         self.last_capture_success = None
@@ -552,11 +559,19 @@ class ScreenshotMonitor:
                   f"on_lunch={status.get('on_lunch')}")
 
             # ── Update shift state for GUI ─────────────────────────────
-            self.clocked_in     = bool(status.get('clocked_in'))
-            self.on_lunch       = bool(status.get('on_lunch'))
-            self.clock_in_time  = status.get('clock_in_time_utc') or status.get('clock_in_time')
-            self.lunch_out_time = status.get('lunch_out_time')
+            self.clocked_in          = bool(status.get('clocked_in'))
+            self.on_lunch            = bool(status.get('on_lunch'))
+            self.clock_in_time       = status.get('clock_in_time')
+            self.clock_in_time_utc   = status.get('clock_in_time_utc')
+            self.lunch_out_time      = status.get('lunch_out_time')
+            self.lunch_used_seconds  = int(status.get('lunch_used_seconds', 0))
+            self.lunch_limit_seconds = int(status.get('lunch_limit_seconds', 3600))
+            self.lunch_remaining_seconds = int(status.get('lunch_remaining_seconds', 3600))
+            self.lunch_exhausted     = bool(status.get('lunch_exhausted', False))
             self.server_capture_disabled = (status.get('reason') == 'disabled')
+
+            # Store session info for elapsed timer
+            self._last_session_info  = status.get('session_info')
 
             # ── Capture interval override ──────────────────────────────
             srv_interval = status.get('capture_interval_minutes')
