@@ -283,17 +283,18 @@ class MonitorGUI:
         # Divider
         ctk.CTkFrame(info_row, width=1, fg_color=BORDER).pack(side="left",
                                                                fill="y", padx=12)
-        # Right: idle today
-        idle_col = ctk.CTkFrame(info_row, fg_color="transparent")
-        idle_col.pack(side="left", fill="both", expand=True)
-        ctk.CTkLabel(idle_col, text="😴  IDLE TODAY", font=self._font(9, "bold"),
+        # Right: lunch remaining
+        lunch_col = ctk.CTkFrame(info_row, fg_color="transparent")
+        lunch_col.pack(side="left", fill="both", expand=True)
+        ctk.CTkLabel(lunch_col, text="🍴  LUNCH LEFT", font=self._font(9, "bold"),
                      text_color=TEXT_MUTED).pack(anchor="w")
-        self._idle_lbl = ctk.CTkLabel(idle_col, text="--",
-                                      font=self._font(20, "bold"),
-                                      text_color=TEXT_MUTED)
-        self._idle_lbl.pack(anchor="w")
-        ctk.CTkLabel(idle_col, text="this shift", font=self._font(10),
-                     text_color=TEXT_MUTED).pack(anchor="w")
+        self._lunch_lbl = ctk.CTkLabel(lunch_col, text="--",
+                                       font=self._font(20, "bold"),
+                                       text_color=TEAL)
+        self._lunch_lbl.pack(anchor="w")
+        self._lunch_sub = ctk.CTkLabel(lunch_col, text="remaining",
+                                       font=self._font(10), text_color=TEXT_MUTED)
+        self._lunch_sub.pack(anchor="w")
 
         # ── IDLE BANNER (hidden by default) ──────────────────────────────
         self._idle_banner = ctk.CTkFrame(self.root, fg_color="#2d1a00",
@@ -429,26 +430,36 @@ class MonitorGUI:
             elif hasattr(self, "_clockin_lbl"):
                 self._clockin_lbl.configure(text="")
 
-            # ── Elapsed timer anchor ──────────────────────────────────────
-            if monitor.clocked_in and monitor.clock_in_time:
+            # ── Elapsed timer anchor (use UTC time for continuity after restart) ──
+            if monitor.clocked_in and monitor.clock_in_time_utc:
                 try:
-                    # clock_in_time from status.php is like "1:32 PM" (display)
-                    # or a UTC datetime — store raw UTC from session_info
-                    si = getattr(monitor, '_last_session_info', None)
-                    if si and si.get('clock_in_time'):
-                        ci_utc = si['clock_in_time']  # "2026-09-07 09:50:00"
-                        self._elapsed_start_ts = datetime.strptime(
-                            ci_utc, '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
-                    else:
-                        if self._elapsed_start_ts is None:
-                            self._elapsed_start_ts = datetime.now(timezone.utc)
+                    self._elapsed_start_ts = datetime.strptime(
+                        monitor.clock_in_time_utc, '%Y-%m-%d %H:%M:%S'
+                    ).replace(tzinfo=timezone.utc)
                 except Exception:
                     if self._elapsed_start_ts is None:
                         self._elapsed_start_ts = datetime.now(timezone.utc)
-            else:
+            elif not monitor.clocked_in:
                 self._elapsed_start_ts = None
                 if hasattr(self, "_elapsed_lbl"):
                     self._elapsed_lbl.configure(text="--:--:--", text_color=TEXT_MUTED)
+
+            # ── Lunch remaining display ───────────────────────────────────
+            if hasattr(self, "_lunch_lbl"):
+                rem = monitor.lunch_remaining_seconds
+                if not monitor.clocked_in and not monitor.on_lunch:
+                    self._lunch_lbl.configure(text="--", text_color=TEXT_MUTED)
+                    self._lunch_sub.configure(text="not clocked in")
+                elif monitor.lunch_exhausted:
+                    self._lunch_lbl.configure(text="0m", text_color=RED)
+                    self._lunch_sub.configure(text="no time left")
+                else:
+                    m = rem // 60
+                    s = rem % 60
+                    display = f"{m}m" if s == 0 else f"{m}m {s}s"
+                    color = YELLOW if rem < 600 else TEAL  # warn when <10 min left
+                    self._lunch_lbl.configure(text=display, text_color=color)
+                    self._lunch_sub.configure(text="remaining")
 
             # ── Clock buttons state ───────────────────────────────────────
             self._update_clock_buttons(is_clocked_in, is_on_lunch)
@@ -460,19 +471,23 @@ class MonitorGUI:
         try:
             EN  = "normal"
             DIS = "disabled"
-            # Clock In: only when fully clocked out
             ci_state = EN if not is_clocked_in and not is_on_lunch else DIS
-            # Lunch Out: only when clocked in but not on lunch
-            lo_state = EN if is_clocked_in and not is_on_lunch else DIS
-            # Lunch In: only when on lunch
+            # Lunch Out disabled when: not clocked in, already on lunch, OR lunch exhausted
+            lo_state = EN if (is_clocked_in and not is_on_lunch
+                              and not monitor.lunch_exhausted) else DIS
             li_state = EN if is_on_lunch else DIS
-            # Clock Out: only when clocked in (whether on lunch or not)
             co_state = EN if is_clocked_in or is_on_lunch else DIS
 
             self._btn_clock_in.configure(state=ci_state)
             self._btn_lunch_out.configure(state=lo_state)
             self._btn_lunch_in.configure(state=li_state)
             self._btn_clock_out.configure(state=co_state)
+
+            # Visual hint on Lunch Out when exhausted
+            if monitor.lunch_exhausted and is_clocked_in:
+                self._btn_lunch_out.configure(text="🍴  No Lunch Left")
+            else:
+                self._btn_lunch_out.configure(text="🍴  Lunch Out")
         except Exception:
             pass
 
@@ -539,10 +554,14 @@ class MonitorGUI:
 
     def _on_clock_result(self, result, btns):
         if not result.get('success'):
-            msg = result.get('message', 'Action failed')
-            self._status_sub.configure(text=f"⚠ {msg[:50]}", text_color=RED)
-            self.root.after(3000, lambda: self.update_status())
-        # Re-enable via next update_status call (triggered by sync in clock_action)
+            if result.get('already_active'):
+                # Informational — shift is still running, just sync to correct state
+                # Don't show red error, just quietly refresh
+                pass
+            else:
+                msg = result.get('message', 'Action failed')
+                self._status_sub.configure(text=f"⚠ {msg[:50]}", text_color=RED)
+                self.root.after(3000, lambda: self.update_status())
         self.update_status()
 
     # ─────────────────────────────────────────────────────────────────────────
