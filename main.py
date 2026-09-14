@@ -168,6 +168,10 @@ class IdleDetector:
     def start(self):
         if self._running:
             return
+        # Reset the idle clock to NOW so we don't inherit the creation-time
+        # timestamp as "last input". Without this, if there's any gap between
+        # __init__ and start() the detector immediately reports fake idle.
+        self._last_input = time.time()
         self._running = True
         if IS_MACOS and MACOS_IDLE_AVAILABLE:
             print("[Idle] Detector started (macOS native Quartz)")
@@ -183,6 +187,9 @@ class IdleDetector:
                 print("[Idle] Detector started (pynput)")
             except Exception as e:
                 print(f"[Idle] pynput start failed: {e}")
+                # pynput failed — reset again so the fallback timer starts
+                # from now rather than from __init__ time
+                self._last_input = time.time()
 
     def stop(self):
         self._running = False
@@ -202,6 +209,13 @@ class IdleDetector:
                     kCGEventSourceStateHIDSystemState, kCGAnyInputEventType))
             except Exception:
                 pass
+        # On macOS without Quartz, pynput is not started (thread-safety +
+        # Input Monitoring permission issues). Rather than falsely reporting
+        # large idle times from the stale _last_input, assume the user is
+        # active. This means idle detection is simply disabled on macOS
+        # without Quartz — far safer than fake idle flags.
+        if IS_MACOS:
+            return 0.0
         return time.time() - self._last_input
 
 
@@ -226,9 +240,10 @@ class ScreenshotMonitor:
         # Values refreshed from status.php on each sync
         self.clocked_in    = False
         self.on_lunch      = False
-        self.clock_in_time = None   # display string e.g. "9:50 AM"
-        self.clock_in_time_utc = None  # raw UTC e.g. "2026-09-07 09:50:00" — used for elapsed
+        self.clock_in_time = None
+        self.clock_in_time_utc = None
         self.lunch_out_time= None
+        self.shift_timezone = 'UTC'   # VA's shift timezone from employee_shifts
 
         # Lunch budget (refreshed on every sync so app enforces without server round-trip)
         self.lunch_used_seconds      = 0
@@ -564,6 +579,7 @@ class ScreenshotMonitor:
             self.clock_in_time       = status.get('clock_in_time')
             self.clock_in_time_utc   = status.get('clock_in_time_utc')
             self.lunch_out_time      = status.get('lunch_out_time')
+            self.shift_timezone      = status.get('shift_timezone') or 'UTC'
             self.lunch_used_seconds  = int(status.get('lunch_used_seconds', 0))
             self.lunch_limit_seconds = int(status.get('lunch_limit_seconds', 3600))
             self.lunch_remaining_seconds = int(status.get('lunch_remaining_seconds', 3600))
@@ -684,9 +700,6 @@ class ScreenshotMonitor:
             return
         if self.server_capture_disabled:
             print("[Capture] Skipping (admin disabled capture for this user)")
-            return
-        if self.is_idle:
-            print("[Capture] Skipping (user is idle)")
             return
         try:
             image_bytes = self.capture_screenshot()
