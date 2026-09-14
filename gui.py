@@ -263,9 +263,9 @@ class MonitorGUI:
 
         # ── Elapsed timer + shift info ────────────────────────────────────
         info_card = ctk.CTkFrame(self.root, fg_color=BG_CARD, corner_radius=14)
-        info_card.pack(fill="x", padx=16, pady=(10, 0))
+        info_card.pack(fill="x", padx=16, pady=(8, 0))
         info_row = ctk.CTkFrame(info_card, fg_color="transparent")
-        info_row.pack(fill="x", padx=16, pady=10)
+        info_row.pack(fill="x", padx=14, pady=(8, 8))
 
         # Left: elapsed
         el_col = ctk.CTkFrame(info_row, fg_color="transparent")
@@ -273,11 +273,11 @@ class MonitorGUI:
         ctk.CTkLabel(el_col, text="⏱  ELAPSED", font=self._font(9, "bold"),
                      text_color=TEXT_MUTED).pack(anchor="w")
         self._elapsed_lbl = ctk.CTkLabel(el_col, text="--:--:--",
-                                         font=self._font(20, "bold"),
+                                         font=self._font(17, "bold"),
                                          text_color=GREEN)
         self._elapsed_lbl.pack(anchor="w")
         self._clockin_lbl = ctk.CTkLabel(el_col, text="",
-                                         font=self._font(10), text_color=TEXT_MUTED)
+                                         font=self._font(9), text_color=TEXT_MUTED)
         self._clockin_lbl.pack(anchor="w")
 
         # Divider
@@ -289,11 +289,11 @@ class MonitorGUI:
         ctk.CTkLabel(lunch_col, text="🍴  LUNCH LEFT", font=self._font(9, "bold"),
                      text_color=TEXT_MUTED).pack(anchor="w")
         self._lunch_lbl = ctk.CTkLabel(lunch_col, text="--",
-                                       font=self._font(20, "bold"),
+                                       font=self._font(17, "bold"),
                                        text_color=TEAL)
         self._lunch_lbl.pack(anchor="w")
         self._lunch_sub = ctk.CTkLabel(lunch_col, text="remaining",
-                                       font=self._font(10), text_color=TEXT_MUTED)
+                                       font=self._font(9), text_color=TEXT_MUTED)
         self._lunch_sub.pack(anchor="w")
 
         # ── IDLE BANNER (hidden by default) ──────────────────────────────
@@ -364,6 +364,7 @@ class MonitorGUI:
                      font=self._font(8), text_color="#333333").pack(pady=(1, 0))
 
         self._elapsed_start_ts = None
+        self._lunch_start_ts   = None
         self._tick_elapsed()
         self.update_status()
 
@@ -424,42 +425,62 @@ class MonitorGUI:
                 self._badge.configure(text="  OFFLINE  ",
                                       fg_color="#1a1a1a", text_color=TEXT_MUTED)
 
-            # ── Clock-in time label ───────────────────────────────────────
-            if monitor.clock_in_time and hasattr(self, "_clockin_lbl"):
-                self._clockin_lbl.configure(text=f"Clocked in: {monitor.clock_in_time}")
+            # ── Clock-in display time in shift timezone (fix 6) ──────────────
+            if monitor.clock_in_time_utc and hasattr(self, "_clockin_lbl"):
+                try:
+                    from zoneinfo import ZoneInfo
+                    _tz  = ZoneInfo(monitor.shift_timezone or 'UTC')
+                    _udt = datetime.strptime(
+                        monitor.clock_in_time_utc, '%Y-%m-%d %H:%M:%S'
+                    ).replace(tzinfo=timezone.utc)
+                    _ldt = _udt.astimezone(_tz)
+                    _h12 = _ldt.hour % 12 or 12
+                    _ap  = "AM" if _ldt.hour < 12 else "PM"
+                    self._clockin_lbl.configure(
+                        text=f"Clocked in: {_h12}:{_ldt.strftime('%M')} {_ap}")
+                except Exception:
+                    self._clockin_lbl.configure(
+                        text=f"Clocked in: {monitor.clock_in_time or ''}")
             elif hasattr(self, "_clockin_lbl"):
                 self._clockin_lbl.configure(text="")
 
-            # ── Elapsed timer anchor (use UTC time for continuity after restart) ──
-            if monitor.clocked_in and monitor.clock_in_time_utc:
-                try:
-                    self._elapsed_start_ts = datetime.strptime(
-                        monitor.clock_in_time_utc, '%Y-%m-%d %H:%M:%S'
-                    ).replace(tzinfo=timezone.utc)
-                except Exception:
-                    if self._elapsed_start_ts is None:
+            # ── Elapsed timer anchor (fix 1) ──────────────────────────────────
+            # Only set when None — don't jitter the running timer on every sync.
+            # Fallback: clock_in_time_utc → session_info.clock_in_time → now
+            if monitor.clocked_in and self._elapsed_start_ts is None:
+                ci_utc = monitor.clock_in_time_utc
+                if not ci_utc:
+                    si = getattr(monitor, '_last_session_info', None)
+                    if si:
+                        ci_utc = si.get('clock_in_time')
+                if ci_utc:
+                    try:
+                        self._elapsed_start_ts = datetime.strptime(
+                            ci_utc, '%Y-%m-%d %H:%M:%S'
+                        ).replace(tzinfo=timezone.utc)
+                    except Exception:
                         self._elapsed_start_ts = datetime.now(timezone.utc)
-            elif not monitor.clocked_in:
+                else:
+                    self._elapsed_start_ts = datetime.now(timezone.utc)
+            elif not monitor.clocked_in and not monitor.on_lunch:
                 self._elapsed_start_ts = None
-                if hasattr(self, "_elapsed_lbl"):
-                    self._elapsed_lbl.configure(text="--:--:--", text_color=TEXT_MUTED)
+                self._lunch_start_ts = None
 
-            # ── Lunch remaining display ───────────────────────────────────
+            # ── Lunch left display (fix 3) ────────────────────────────────────
+            # Static from last server sync; live countdown handled in _tick_elapsed
             if hasattr(self, "_lunch_lbl"):
-                rem = monitor.lunch_remaining_seconds
                 if not monitor.clocked_in and not monitor.on_lunch:
                     self._lunch_lbl.configure(text="--", text_color=TEXT_MUTED)
                     self._lunch_sub.configure(text="not clocked in")
                 elif monitor.lunch_exhausted:
                     self._lunch_lbl.configure(text="0m", text_color=RED)
                     self._lunch_sub.configure(text="no time left")
-                else:
-                    m = rem // 60
-                    s = rem % 60
-                    display = f"{m}m" if s == 0 else f"{m}m {s}s"
-                    color = YELLOW if rem < 600 else TEAL  # warn when <10 min left
-                    self._lunch_lbl.configure(text=display, text_color=color)
+                elif not monitor.on_lunch:
+                    rm  = monitor.lunch_remaining_seconds // 60
+                    color = YELLOW if monitor.lunch_remaining_seconds < 600 else TEAL
+                    self._lunch_lbl.configure(text=f"{rm}m", text_color=color)
                     self._lunch_sub.configure(text="remaining")
+                # When on lunch: _tick_elapsed handles live countdown
 
             # ── Clock buttons state ───────────────────────────────────────
             self._update_clock_buttons(is_clocked_in, is_on_lunch)
@@ -495,19 +516,51 @@ class MonitorGUI:
     # ELAPSED TICKER
     # ─────────────────────────────────────────────────────────────────────────
     def _tick_elapsed(self):
-        """Runs every second on the main thread to update the elapsed display."""
+        """Runs every second. Shows shift elapsed or lunch elapsed depending on state."""
         try:
-            if hasattr(self, "_elapsed_lbl") and self._elapsed_start_ts:
+            if not hasattr(self, "_elapsed_lbl"):
+                self.root.after(1000, self._tick_elapsed)
+                return
+
+            if monitor.on_lunch:
+                # ── Lunch elapsed counter (fix 2) ─────────────────────────────
+                if self._lunch_start_ts is None:
+                    self._lunch_start_ts = datetime.now(timezone.utc)
+                now          = datetime.now(timezone.utc)
+                lunch_secs   = int((now - self._lunch_start_ts).total_seconds())
+                lh = lunch_secs // 3600
+                lm = (lunch_secs % 3600) // 60
+                ls = lunch_secs % 60
+                self._elapsed_lbl.configure(
+                    text=f"{lh:02d}:{lm:02d}:{ls:02d}", text_color=YELLOW)
+
+                # Live lunch remaining countdown
+                if hasattr(self, "_lunch_lbl"):
+                    live_rem = max(0, monitor.lunch_remaining_seconds - lunch_secs)
+                    rm  = live_rem // 60
+                    rs  = live_rem % 60
+                    disp  = f"{rm}m {rs}s" if rs else f"{rm}m"
+                    color = RED if live_rem == 0 else (YELLOW if live_rem < 600 else TEAL)
+                    self._lunch_lbl.configure(
+                        text="0m" if live_rem == 0 else disp, text_color=color)
+                    self._lunch_sub.configure(
+                        text="time's up! clock back in" if live_rem == 0 else "on lunch")
+
+            elif monitor.clocked_in and self._elapsed_start_ts:
+                # ── Shift elapsed (fix 1) ──────────────────────────────────────
+                self._lunch_start_ts = None   # reset when not on lunch
                 now     = datetime.now(timezone.utc)
-                elapsed = int((now - self._elapsed_start_ts).total_seconds())
-                elapsed = max(0, elapsed)
+                elapsed = max(0, int((now - self._elapsed_start_ts).total_seconds()))
                 h = elapsed // 3600
                 m = (elapsed % 3600) // 60
                 s = elapsed % 60
                 self._elapsed_lbl.configure(
                     text=f"{h:02d}:{m:02d}:{s:02d}",
-                    text_color=GREEN if monitor.is_monitoring and not monitor.is_paused
-                               else TEXT_MUTED)
+                    text_color=GREEN if monitor.is_monitoring else TEXT_MUTED)
+
+            else:
+                self._elapsed_lbl.configure(text="--:--:--", text_color=TEXT_MUTED)
+
         except Exception:
             pass
         self.root.after(1000, self._tick_elapsed)
