@@ -532,26 +532,29 @@ class MonitorGUI:
                 return
 
             if monitor.on_lunch:
-                # ── Lunch elapsed counter (fix 2) ─────────────────────────────
+                # ── Lunch elapsed counter ──────────────────────────────────────
                 if self._lunch_start_ts is None:
-                    # If lunch was already in progress when we first detected it
-                    # (e.g. started in hub browser, or app restarted during lunch),
-                    # back-calculate the start time using lunch_used_seconds from
-                    # the server so the countdown is accurate, not reset to 0.
-                    already_used = getattr(monitor, 'lunch_used_seconds', 0)
-                    self._lunch_start_ts = datetime.now(timezone.utc) - \
-                        __import__('datetime').timedelta(seconds=already_used)
-                now          = datetime.now(timezone.utc)
-                lunch_secs   = int((now - self._lunch_start_ts).total_seconds())
-                lh = lunch_secs // 3600
-                lm = (lunch_secs % 3600) // 60
-                ls = lunch_secs % 60
+                    # Set to now. live_rem counts down from server's
+                    # lunch_remaining_seconds. Using back-calculation caused
+                    # double-subtraction: lunch_remaining already has
+                    # lunch_used subtracted; subtracting lunch_secs (which
+                    # started at already_used) subtracted it a second time.
+                    self._lunch_start_ts = datetime.now(timezone.utc)
+
+                now     = datetime.now(timezone.utc)
+                elapsed = int((now - self._lunch_start_ts).total_seconds())
+
+                # Show total lunch duration = what server knew + elapsed here
+                total_lunch = getattr(monitor, 'lunch_used_seconds', 0) + elapsed
+                lh = total_lunch // 3600
+                lm = (total_lunch % 3600) // 60
+                ls = total_lunch % 60
                 self._elapsed_lbl.configure(
                     text=f"{lh:02d}:{lm:02d}:{ls:02d}", text_color=YELLOW)
 
-                # Live lunch remaining countdown
+                # Live lunch remaining — count down from last server value
                 if hasattr(self, "_lunch_lbl"):
-                    live_rem = max(0, monitor.lunch_remaining_seconds - lunch_secs)
+                    live_rem = max(0, monitor.lunch_remaining_seconds - elapsed)
                     rm  = live_rem // 60
                     rs  = live_rem % 60
                     disp  = f"{rm}m {rs}s" if rs else f"{rm}m"
