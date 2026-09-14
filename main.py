@@ -368,6 +368,7 @@ class ScreenshotMonitor:
 
     def logout(self):
         self.stop_monitoring()
+        schedule.clear()  # Kill the sync job too — user has logged out
         self._clear_credentials()
 
     # ── Clock action (NEW) ────────────────────────────────────────────────
@@ -546,7 +547,7 @@ class ScreenshotMonitor:
             schedule.cancel_job(self._capture_job)
             self._capture_job = None
         self._capture_job = schedule.every(new_interval_minutes).minutes.do(
-            self.capture_and_upload)
+            self.capture_and_upload).tag('monitoring')
         print(f"[Monitor] Rescheduled capture every {new_interval_minutes}m")
 
     def sync_with_tracker(self):
@@ -753,23 +754,26 @@ class ScreenshotMonitor:
         self.is_paused     = False
 
         self._capture_job = schedule.every(
-            CONFIG['CAPTURE_INTERVAL_MINUTES']).minutes.do(self.capture_and_upload)
+            CONFIG['CAPTURE_INTERVAL_MINUTES']).minutes.do(
+            self.capture_and_upload).tag('monitoring')
         threading.Timer(5.0, self.capture_and_upload).start()
         print(f"[Monitor] Capture job scheduled every {CONFIG['CAPTURE_INTERVAL_MINUTES']}m")
 
         self.last_capture_success = time.time()
-        schedule.every(1).minutes.do(self.capture_watchdog)
+        schedule.every(1).minutes.do(self.capture_watchdog).tag('monitoring')
 
         try:
             self.idle_detector.start()
-            schedule.every(CONFIG['IDLE_CHECK_INTERVAL_SECONDS']).seconds.do(self.check_idle)
+            schedule.every(CONFIG['IDLE_CHECK_INTERVAL_SECONDS']).seconds.do(
+                self.check_idle).tag('monitoring')
             print("[Monitor] Idle detection started")
         except Exception as e:
             print(f"[Monitor] Idle detection failed (continuing): {e}")
 
-        # Activity tracking
-        schedule.every(CONFIG['ACTIVITY_CHECK_SECONDS']).seconds.do(self.activity_tracker.check)
-        schedule.every(CONFIG['ACTIVITY_FLUSH_SECONDS']).seconds.do(self.flush_activity)
+        schedule.every(CONFIG['ACTIVITY_CHECK_SECONDS']).seconds.do(
+            self.activity_tracker.check).tag('monitoring')
+        schedule.every(CONFIG['ACTIVITY_FLUSH_SECONDS']).seconds.do(
+            self.flush_activity).tag('monitoring')
         print("[Monitor] Activity tracking started")
 
         if self.on_status_changed:
@@ -787,7 +791,18 @@ class ScreenshotMonitor:
         self.is_monitoring = False
         self.is_paused     = False
         self._capture_job  = None
-        schedule.clear()
+
+        # Stop idle detector so _running resets to False.
+        # Without this, the next idle_detector.start() returns immediately
+        # (thinks it's already running) and never resets _last_input —
+        # causing permanent idle on the next clock-in cycle.
+        self.idle_detector.stop()
+
+        # Clear ONLY monitoring-tagged jobs (capture, watchdog, idle, activity).
+        # The 'sync' job must survive so we can detect the next clock-in event
+        # without requiring a manual action or full app restart.
+        schedule.clear('monitoring')
+
         if self.on_status_changed:
             self.on_status_changed()
         print("[Monitor] Stopped")
