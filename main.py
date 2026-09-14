@@ -229,35 +229,36 @@ class IdleDetector:
             except Exception:
                 pass  # Fall through to pynput
 
-        # ── Linux: gdbus (pre-installed on GNOME/Cinnamon/KDE/XFCE) ──────────
-        # Queries the GNOME Mutter idle monitor — works on Linux Mint Cinnamon,
-        # Ubuntu, Fedora, etc. No extra packages needed; gdbus ships with glib2
-        # which is present on every modern Linux desktop.
+        # ── Linux: python-xlib XScreenSaver extension ─────────────────────────
+        # python-xlib is bundled inside the app binary by PyInstaller —
+        # VAs don't need to install anything. Works on ALL X11 Linux desktops
+        # (Cinnamon, GNOME, KDE, XFCE, etc.) because it queries the X server
+        # directly, not a desktop-specific D-Bus service.
+        # gdbus/org.gnome.Mutter fails on Linux Mint Cinnamon (uses Muffin not
+        # Mutter), so this is the correct cross-desktop solution.
         if sys.platform.startswith('linux'):
             try:
-                import subprocess as _sp, re as _re
-                _r = _sp.run(
-                    ['gdbus', 'call', '--session',
-                     '--dest', 'org.gnome.Mutter.IdleMonitor',
-                     '--object-path', '/org/gnome/Mutter/IdleMonitor/Core',
-                     '--method', 'org.gnome.Mutter.IdleMonitor.GetIdletime'],
-                    capture_output=True, text=True, timeout=0.5)
-                if _r.returncode == 0:
-                    _m = _re.search(r'(\d+)', _r.stdout)
-                    if _m:
-                        return int(_m.group(1)) / 1000.0
-            except Exception:
-                pass  # Fall through to xprintidle / pynput
+                from Xlib import display as _xdisp
+                from Xlib.ext import screensaver as _xss
+                _d = _xdisp.Display()
+                _root = _d.screen().root
+                _info = _xss.query_info(_d, _root)
+                _d.close()
+                return _info.idle / 1000.0   # milliseconds → seconds
+            except Exception as _e:
+                print(f"[Idle] python-xlib failed: {_e}")
+                # Final fallback: xprintidle if user has it installed
+                try:
+                    import subprocess as _sp
+                    _r = _sp.run(['xprintidle'], capture_output=True,
+                                  text=True, timeout=0.5)
+                    if _r.returncode == 0 and _r.stdout.strip():
+                        return int(_r.stdout.strip()) / 1000.0
+                except Exception:
+                    pass
 
-            # xprintidle (optional, user may have it installed)
-            try:
-                import subprocess as _sp
-                _r = _sp.run(['xprintidle'], capture_output=True,
-                              text=True, timeout=0.5)
-                if _r.returncode == 0 and _r.stdout.strip():
-                    return int(_r.stdout.strip()) / 1000.0
-            except Exception:
-                pass
+        # ── Last resort: pynput _last_input tracking ──────────────────────────
+        return time.time() - self._last_input
 
         # ── Fallback: pynput-based _last_input tracking ───────────────────────
         return time.time() - self._last_input
@@ -544,10 +545,16 @@ class ScreenshotMonitor:
     def upload_screenshot(self, image_bytes):
         try:
             print("[Upload] Uploading screenshot...")
+            # upload.php reads file_get_contents('php://input') and json_decodes it,
+            # then looks for $json_data['screenshot'].
+            # Sending as JSON body (not raw base64 or form-encoded) is the correct format.
             resp = requests.post(
                 CONFIG['UPLOAD_URL'],
-                data=base64.b64encode(image_bytes).decode(),
-                headers={**self._auth_headers(), 'Content-Type': 'text/plain'},
+                json={
+                    'screenshot': base64.b64encode(image_bytes).decode(),
+                    'timestamp':  datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                },
+                headers=self._auth_headers(),
                 timeout=(15, 60)
             )
             print(f"[Upload] Response code: {resp.status_code}")
@@ -724,8 +731,8 @@ class ScreenshotMonitor:
 
     def check_idle(self):
         try:
-            if not self.is_monitoring:
-                return
+            if not self.is_monitoring or self.is_paused:
+                return  # Don't flag idle during lunch breaks
             idle_now = self.idle_detector.seconds_idle()
             threshold = CONFIG['IDLE_DETECTION_THRESHOLD_SECONDS']
             ceiling   = CONFIG['IDLE_SANITY_CEILING_SECONDS']
@@ -896,6 +903,12 @@ class ScreenshotMonitor:
             return
         print("[Monitor] Resuming...")
         self.is_paused = False
+        # Clear any idle state that built up during lunch — the user just
+        # actively pressed Lunch In, so they are demonstrably not idle.
+        if self.is_idle:
+            print("[Monitor] Clearing idle state on resume from lunch")
+            self.is_idle = False
+            self.idle_detector._last_input = time.time()  # reset pynput fallback too
         if self.on_status_changed:
             self.on_status_changed()
 
