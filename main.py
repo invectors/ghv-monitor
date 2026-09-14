@@ -209,13 +209,24 @@ class IdleDetector:
                     kCGEventSourceStateHIDSystemState, kCGAnyInputEventType))
             except Exception:
                 pass
-        # On macOS without Quartz, pynput is not started (thread-safety +
-        # Input Monitoring permission issues). Rather than falsely reporting
-        # large idle times from the stale _last_input, assume the user is
-        # active. This means idle detection is simply disabled on macOS
-        # without Quartz — far safer than fake idle flags.
+        # macOS without Quartz: assume active (pynput not safe on macOS threads)
         if IS_MACOS:
             return 0.0
+        # Linux: xprintidle queries the X11 server's idle counter directly.
+        # This is more reliable than pynput which may silently fail to receive
+        # events on Wayland, some display configs, or when app lacks X11 focus.
+        if sys.platform.startswith('linux'):
+            try:
+                import subprocess as _sp
+                _r = _sp.run(['xprintidle'], capture_output=True,
+                              text=True, timeout=0.5)
+                if _r.returncode == 0 and _r.stdout.strip():
+                    return int(_r.stdout.strip()) / 1000.0  # ms → seconds
+            except FileNotFoundError:
+                pass  # xprintidle not installed — fall through to pynput path
+            except Exception:
+                pass
+        # Windows (or Linux without xprintidle): pynput-based tracking
         return time.time() - self._last_input
 
 
@@ -450,9 +461,51 @@ class ScreenshotMonitor:
                         screenshot = sct.grab(sct.monitors[0])
                         img = Image.frombytes('RGB', screenshot.size, screenshot.rgb)
             else:
-                with mss.mss() as sct:
-                    screenshot = sct.grab(sct.monitors[0])
-                    img = Image.frombytes('RGB', screenshot.size, screenshot.rgb)
+                # Windows / Linux
+                # On Linux, mss.monitors[0] is the virtual "all monitors" composite
+                # which silently fails on some distros. Try monitors[1] (primary
+                # physical screen) first, then fall back to scrot.
+                img = None
+                last_err = None
+                try:
+                    with mss.mss() as sct:
+                        mon = sct.monitors[1] if (
+                            sys.platform.startswith('linux')
+                            and len(sct.monitors) > 1
+                        ) else sct.monitors[0]
+                        screenshot = sct.grab(mon)
+                        img = Image.frombytes('RGB', screenshot.size, screenshot.rgb)
+                        print(f"[Screenshot] mss captured {img.width}x{img.height}")
+                except Exception as e:
+                    last_err = e
+                    print(f"[Screenshot] mss failed: {e}")
+
+                # Linux fallback: scrot
+                if img is None and sys.platform.startswith('linux'):
+                    try:
+                        import tempfile, subprocess as _sp, os as _os
+                        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as _f:
+                            _tmp = _f.name
+                        try:
+                            _res = _sp.run(
+                                ['scrot', '-z', _tmp],
+                                capture_output=True, timeout=10
+                            )
+                            if _res.returncode == 0 and _os.path.getsize(_tmp) > 0:
+                                img = Image.open(_tmp).convert('RGB')
+                                print(f"[Screenshot] scrot captured {img.width}x{img.height}")
+                            else:
+                                print(f"[Screenshot] scrot rc={_res.returncode}")
+                        finally:
+                            try: _os.unlink(_tmp)
+                            except OSError: pass
+                    except FileNotFoundError:
+                        print("[Screenshot] scrot not installed")
+                    except Exception as e:
+                        print(f"[Screenshot] scrot failed: {e}")
+
+                if img is None:
+                    raise Exception(f"All capture methods failed. Last mss error: {last_err}")
 
             if img.width > CONFIG['MAX_IMAGE_WIDTH']:
                 ratio  = CONFIG['MAX_IMAGE_WIDTH'] / img.width
@@ -656,6 +709,9 @@ class ScreenshotMonitor:
             idle_now = self.idle_detector.seconds_idle()
             threshold = CONFIG['IDLE_DETECTION_THRESHOLD_SECONDS']
             ceiling   = CONFIG['IDLE_SANITY_CEILING_SECONDS']
+
+            # Log every check so we can see if xprintidle / pynput is working
+            print(f"[Idle] idle_now={idle_now:.1f}s threshold={threshold}s is_idle={self.is_idle}")
 
             if idle_now < threshold and self.is_idle:
                 print(f"[Idle] User returned to activity")
