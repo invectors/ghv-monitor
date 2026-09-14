@@ -240,14 +240,14 @@ class IdleDetector:
             try:
                 from Xlib import display as _xdisp
                 from Xlib.ext import screensaver as _xss
-                _d = _xdisp.Display()
+                _d    = _xdisp.Display()
                 _root = _d.screen().root
-                _info = _xss.query_info(_d, _root)
+                _info = _xss.query_info(_root)   # drawable only — not (display, drawable)
+                _idle = _info.idle
                 _d.close()
-                return _info.idle / 1000.0   # milliseconds → seconds
+                return _idle / 1000.0
             except Exception as _e:
                 print(f"[Idle] python-xlib failed: {_e}")
-                # Final fallback: xprintidle if user has it installed
                 try:
                     import subprocess as _sp
                     _r = _sp.run(['xprintidle'], capture_output=True,
