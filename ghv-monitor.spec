@@ -4,13 +4,50 @@ import os
 
 block_cipher = None
 
-# Allow CI to pin the macOS architecture (e.g. 'x86_64' or 'arm64').
-# Falls back to None = "build for the current runner" when unset.
 TARGET_ARCH = os.environ.get('GHV_TARGET_ARCH') or None
 
-# customtkinter ships its own theme JSON files that must be bundled.
 import customtkinter
 CTK_PATH = os.path.dirname(customtkinter.__file__)
+
+# ── PE Version Info (Windows) ─────────────────────────────────────────────────
+# Embedding publisher metadata significantly reduces Windows Defender's
+# Bearfoos.A!ml ML false-positive score on PyInstaller executables.
+# Anonymous EXEs with no PE version info look far more suspicious to the
+# heuristic. This block is harmless on macOS — PyInstaller simply ignores it.
+try:
+    from PyInstaller.utils.win32.versioninfo import (
+        VSVersionInfo, FixedFileInfo, StringFileInfo, StringTable,
+        StringStruct, VarFileInfo, VarStruct
+    )
+    version_info = VSVersionInfo(
+        ffi=FixedFileInfo(
+            filevers=(1, 11, 0, 0),
+            prodvers=(1, 11, 0, 0),
+            mask=0x3f, flags=0x0, OS=0x4,
+            fileType=0x1, subtype=0x0,
+            date=(0, 0)
+        ),
+        kids=[
+            StringFileInfo([
+                StringTable(
+                    u'040904B0',
+                    [
+                        StringStruct(u'CompanyName',      u'GoHireVirtual'),
+                        StringStruct(u'FileDescription',  u'GHV Monitor - Employee Screenshot Monitoring'),
+                        StringStruct(u'FileVersion',      u'1.11.0.0'),
+                        StringStruct(u'InternalName',     u'GHV-Monitor'),
+                        StringStruct(u'LegalCopyright',   u'Copyright GoHireVirtual'),
+                        StringStruct(u'OriginalFilename', u'GHV-Monitor.exe'),
+                        StringStruct(u'ProductName',      u'GHV Monitor'),
+                        StringStruct(u'ProductVersion',   u'1.11.0'),
+                    ]
+                )
+            ]),
+            VarFileInfo([VarStruct(u'Translation', [0x0409, 1200])])
+        ]
+    )
+except Exception:
+    version_info = None
 
 a = Analysis(
     ['app.py'],
@@ -31,6 +68,7 @@ a = Analysis(
         'customtkinter.windows.widgets.scaling',
         'customtkinter.windows.widgets.font',
         'version',
+        'zoneinfo',
     ],
     hookspath=[],
     hooksconfig={},
@@ -55,7 +93,10 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    # UPX disabled — UPX compression is the single biggest trigger for
+    # Windows Defender's Bearfoos.A!ml ML heuristic on PyInstaller EXEs.
+    # Disabling it costs ~5-10 MB in file size but eliminates the false positive.
+    upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
     console=False,
@@ -64,6 +105,7 @@ exe = EXE(
     target_arch=TARGET_ARCH,
     codesign_identity=None,
     entitlements_file=None,
+    version=version_info,
 )
 
 app = BUNDLE(
