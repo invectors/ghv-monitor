@@ -203,30 +203,63 @@ class IdleDetector:
         self._ms_listener = None
 
     def seconds_idle(self) -> float:
+        # ── macOS: Quartz system idle query ───────────────────────────────────
         if IS_MACOS and MACOS_IDLE_AVAILABLE:
             try:
                 return float(CGEventSourceSecondsSinceLastEventType(
                     kCGEventSourceStateHIDSystemState, kCGAnyInputEventType))
             except Exception:
                 pass
-        # macOS without Quartz: assume active (pynput not safe on macOS threads)
         if IS_MACOS:
-            return 0.0
-        # Linux: xprintidle queries the X11 server's idle counter directly.
-        # This is more reliable than pynput which may silently fail to receive
-        # events on Wayland, some display configs, or when app lacks X11 focus.
+            return 0.0  # Quartz unavailable — assume active
+
+        # ── Windows: GetLastInputInfo via ctypes ──────────────────────────────
+        # Native WinAPI, zero external dependencies, highly reliable.
+        if IS_WINDOWS:
+            try:
+                import ctypes
+                class _LASTINPUT(ctypes.Structure):
+                    _fields_ = [('cbSize', ctypes.c_uint),
+                                 ('dwTime', ctypes.c_uint)]
+                _lii = _LASTINPUT()
+                _lii.cbSize = ctypes.sizeof(_LASTINPUT)
+                ctypes.windll.user32.GetLastInputInfo(ctypes.byref(_lii))
+                _elapsed_ms = ctypes.windll.kernel32.GetTickCount() - _lii.dwTime
+                return max(0, _elapsed_ms / 1000.0)
+            except Exception:
+                pass  # Fall through to pynput
+
+        # ── Linux: gdbus (pre-installed on GNOME/Cinnamon/KDE/XFCE) ──────────
+        # Queries the GNOME Mutter idle monitor — works on Linux Mint Cinnamon,
+        # Ubuntu, Fedora, etc. No extra packages needed; gdbus ships with glib2
+        # which is present on every modern Linux desktop.
         if sys.platform.startswith('linux'):
+            try:
+                import subprocess as _sp, re as _re
+                _r = _sp.run(
+                    ['gdbus', 'call', '--session',
+                     '--dest', 'org.gnome.Mutter.IdleMonitor',
+                     '--object-path', '/org/gnome/Mutter/IdleMonitor/Core',
+                     '--method', 'org.gnome.Mutter.IdleMonitor.GetIdletime'],
+                    capture_output=True, text=True, timeout=0.5)
+                if _r.returncode == 0:
+                    _m = _re.search(r'(\d+)', _r.stdout)
+                    if _m:
+                        return int(_m.group(1)) / 1000.0
+            except Exception:
+                pass  # Fall through to xprintidle / pynput
+
+            # xprintidle (optional, user may have it installed)
             try:
                 import subprocess as _sp
                 _r = _sp.run(['xprintidle'], capture_output=True,
                               text=True, timeout=0.5)
                 if _r.returncode == 0 and _r.stdout.strip():
-                    return int(_r.stdout.strip()) / 1000.0  # ms → seconds
-            except FileNotFoundError:
-                pass  # xprintidle not installed — fall through to pynput path
+                    return int(_r.stdout.strip()) / 1000.0
             except Exception:
                 pass
-        # Windows (or Linux without xprintidle): pynput-based tracking
+
+        # ── Fallback: pynput-based _last_input tracking ───────────────────────
         return time.time() - self._last_input
 
 
@@ -461,51 +494,38 @@ class ScreenshotMonitor:
                         screenshot = sct.grab(sct.monitors[0])
                         img = Image.frombytes('RGB', screenshot.size, screenshot.rgb)
             else:
-                # Windows / Linux
-                # On Linux, mss.monitors[0] is the virtual "all monitors" composite
-                # which silently fails on some distros. Try monitors[1] (primary
-                # physical screen) first, then fall back to scrot.
-                img = None
-                last_err = None
+                # Windows / Linux — mss with monitors[0] (full virtual screen).
+                # monitors[0] was confirmed working on Linux Mint before the
+                # monitors[1] change was introduced. Reverted.
                 try:
                     with mss.mss() as sct:
-                        mon = sct.monitors[1] if (
-                            sys.platform.startswith('linux')
-                            and len(sct.monitors) > 1
-                        ) else sct.monitors[0]
-                        screenshot = sct.grab(mon)
+                        screenshot = sct.grab(sct.monitors[0])
                         img = Image.frombytes('RGB', screenshot.size, screenshot.rgb)
                         print(f"[Screenshot] mss captured {img.width}x{img.height}")
-                except Exception as e:
-                    last_err = e
-                    print(f"[Screenshot] mss failed: {e}")
-
-                # Linux fallback: scrot
-                if img is None and sys.platform.startswith('linux'):
-                    try:
-                        import tempfile, subprocess as _sp, os as _os
-                        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as _f:
-                            _tmp = _f.name
+                except Exception as _mss_err:
+                    print(f"[Screenshot] mss error: {_mss_err}")
+                    # Linux fallback: scrot (if installed)
+                    img = None
+                    if sys.platform.startswith('linux'):
                         try:
-                            _res = _sp.run(
-                                ['scrot', '-z', _tmp],
-                                capture_output=True, timeout=10
-                            )
-                            if _res.returncode == 0 and _os.path.getsize(_tmp) > 0:
-                                img = Image.open(_tmp).convert('RGB')
-                                print(f"[Screenshot] scrot captured {img.width}x{img.height}")
-                            else:
-                                print(f"[Screenshot] scrot rc={_res.returncode}")
-                        finally:
-                            try: _os.unlink(_tmp)
-                            except OSError: pass
-                    except FileNotFoundError:
-                        print("[Screenshot] scrot not installed")
-                    except Exception as e:
-                        print(f"[Screenshot] scrot failed: {e}")
-
-                if img is None:
-                    raise Exception(f"All capture methods failed. Last mss error: {last_err}")
+                            import tempfile as _tf, subprocess as _sp, os as _os
+                            with _tf.NamedTemporaryFile(suffix='.png', delete=False) as _f:
+                                _tmp = _f.name
+                            try:
+                                _r = _sp.run(['scrot', '-z', _tmp],
+                                             capture_output=True, timeout=10)
+                                if _r.returncode == 0 and _os.path.getsize(_tmp) > 0:
+                                    img = Image.open(_tmp).convert('RGB')
+                                    print(f"[Screenshot] scrot fallback: {img.width}x{img.height}")
+                            finally:
+                                try: _os.unlink(_tmp)
+                                except OSError: pass
+                        except FileNotFoundError:
+                            pass
+                        except Exception as _sc_err:
+                            print(f"[Screenshot] scrot fallback failed: {_sc_err}")
+                    if img is None:
+                        raise
 
             if img.width > CONFIG['MAX_IMAGE_WIDTH']:
                 ratio  = CONFIG['MAX_IMAGE_WIDTH'] / img.width
