@@ -99,7 +99,7 @@ class ActivityTracker:
         self._pending       = []
 
     # ── Platform-specific window detection ────────────────────────────────
-    def _active_window(self):
+        def _active_window(self):
         """Returns (app_name, window_title) or (None, None) on failure."""
         try:
             if IS_MACOS:
@@ -118,6 +118,56 @@ class ActivityTracker:
                 except Exception:
                     app = ''
                 return app, title
+
+            else:  # Linux — uses python-xlib (already bundled for idle detection)
+                from Xlib import display as _xd, X as _X
+                _d    = _xd.Display()
+                _root = _d.screen().root
+
+                _atom = _d.intern_atom('_NET_ACTIVE_WINDOW')
+                _prop = _root.get_full_property(_atom, _X.AnyPropertyType)
+                if not _prop or not _prop.value:
+                    _d.close()
+                    return None, None
+
+                _win_id = _prop.value[0]
+                if not _win_id:
+                    _d.close()
+                    return None, None
+
+                _win = _d.create_resource_object('window', _win_id)
+
+                title = ''
+                for _name_atom in ('_NET_WM_NAME', 'WM_NAME'):
+                    _np = _win.get_full_property(
+                        _d.intern_atom(_name_atom), _X.AnyPropertyType)
+                    if _np and _np.value:
+                        try:
+                            title = (_np.value.decode('utf-8')
+                                     if isinstance(_np.value, (bytes, bytearray))
+                                     else str(_np.value))
+                            break
+                        except Exception:
+                            pass
+
+                app = ''
+                _pid_prop = _win.get_full_property(
+                    _d.intern_atom('_NET_WM_PID'), _X.AnyPropertyType)
+                if _pid_prop and _pid_prop.value:
+                    try:
+                        import psutil
+                        app = psutil.Process(_pid_prop.value[0]).name()
+                    except Exception:
+                        pass
+
+                if not app:
+                    _wmc = _win.get_wm_class()
+                    if _wmc:
+                        app = _wmc[1] if len(_wmc) > 1 else _wmc[0]
+
+                _d.close()
+                return (app or 'Unknown', title)
+
         except Exception as e:
             print(f"[Activity] Window detection error: {e}")
         return None, None
