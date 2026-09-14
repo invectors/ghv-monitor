@@ -7,6 +7,7 @@ Dark theme. Status screen includes clock actions, elapsed timer, and idle banner
 import tkinter as tk
 import customtkinter as ctk
 import threading
+import schedule
 from datetime import datetime, timezone
 from main import monitor, CONFIG
 
@@ -207,6 +208,14 @@ class MonitorGUI:
     def _handle_login(self, result):
         if result["success"]:
             self._show_status()
+            # Sync immediately so we detect existing clock-in state (e.g. after
+            # an accidental reboot), then keep syncing every 30 seconds.
+            # Tagged 'sync' so stop_monitoring() doesn't wipe it.
+            def _start_sync():
+                monitor.sync_with_tracker()
+                schedule.every(CONFIG['STATUS_CHECK_SECONDS']).seconds.do(
+                    monitor.sync_with_tracker).tag('sync')
+            threading.Thread(target=_start_sync, daemon=True).start()
         else:
             msg = result.get("message", "Invalid credentials")
             self._login_btn.configure(state="normal", text=f"✕  {msg[:38]}")
@@ -525,7 +534,13 @@ class MonitorGUI:
             if monitor.on_lunch:
                 # ── Lunch elapsed counter (fix 2) ─────────────────────────────
                 if self._lunch_start_ts is None:
-                    self._lunch_start_ts = datetime.now(timezone.utc)
+                    # If lunch was already in progress when we first detected it
+                    # (e.g. started in hub browser, or app restarted during lunch),
+                    # back-calculate the start time using lunch_used_seconds from
+                    # the server so the countdown is accurate, not reset to 0.
+                    already_used = getattr(monitor, 'lunch_used_seconds', 0)
+                    self._lunch_start_ts = datetime.now(timezone.utc) - \
+                        __import__('datetime').timedelta(seconds=already_used)
                 now          = datetime.now(timezone.utc)
                 lunch_secs   = int((now - self._lunch_start_ts).total_seconds())
                 lh = lunch_secs // 3600
