@@ -335,7 +335,10 @@ class MonitorGUI:
         row1 = ctk.CTkFrame(btn_card, fg_color="transparent")
         row1.pack(fill="x", padx=12, pady=(0, 4))
         row2 = ctk.CTkFrame(btn_card, fg_color="transparent")
-        row2.pack(fill="x", padx=12, pady=(0, 12))
+        row2.pack(fill="x", padx=12, pady=(0, 4))
+
+        row3 = ctk.CTkFrame(btn_card, fg_color="transparent")
+        row3.pack(fill="x", padx=12, pady=(0, 12))
 
         btn_cfg = dict(height=38, corner_radius=8,
                        font=self._font(11, "bold"), text_color=TEXT)
@@ -364,6 +367,14 @@ class MonitorGUI:
                                             **btn_cfg)
         self._btn_clock_out.pack(side="left", fill="x", expand=True, padx=(4, 0))
 
+        # 📱 Mobile work row — full width, teal
+        self._btn_mobile = ctk.CTkButton(
+            row3, text="📱  Working on Mobile?",
+            fg_color=TEAL, hover_color=TEAL_DIM,
+            command=self._mobile_toggle,
+            **btn_cfg)
+        self._btn_mobile.pack(fill="x")
+
         # ── Footer ────────────────────────────────────────────────────────
         foot = ctk.CTkFrame(self.root, fg_color="transparent")
         foot.pack(fill="x", pady=(10, 8))
@@ -374,6 +385,7 @@ class MonitorGUI:
 
         self._elapsed_start_ts = None
         self._lunch_start_ts   = None
+        self._mobile_start_ts  = None   # set when mobile mode detected
         self._tick_elapsed()
         self.update_status()
 
@@ -518,6 +530,21 @@ class MonitorGUI:
                 self._btn_lunch_out.configure(text="🍴  No Lunch Left")
             else:
                 self._btn_lunch_out.configure(text="🍴  Lunch Out")
+
+            # Mobile button
+            if hasattr(self, '_btn_mobile'):
+                if monitor.is_on_mobile:
+                    self._btn_mobile.configure(
+                        text="📱  I'm Back — End Mobile Mode",
+                        fg_color=RED, hover_color=RED_DIM, state=EN)
+                elif is_clocked_in and not is_on_lunch:
+                    self._btn_mobile.configure(
+                        text="📱  Working on Mobile?",
+                        fg_color=TEAL, hover_color=TEAL_DIM, state=EN)
+                else:
+                    self._btn_mobile.configure(
+                        text="📱  Working on Mobile?",
+                        fg_color=TEAL, hover_color=TEAL_DIM, state=DIS)
         except Exception:
             pass
 
@@ -564,9 +591,24 @@ class MonitorGUI:
                     self._lunch_sub.configure(
                         text="time's up! clock back in" if live_rem == 0 else "on lunch")
 
+            elif monitor.is_on_mobile:
+                # ── Mobile work countdown ──────────────────────────────────────
+                if self._mobile_start_ts is None:
+                    self._mobile_start_ts = datetime.now(timezone.utc)
+                now     = datetime.now(timezone.utc)
+                elapsed = int((now - self._mobile_start_ts).total_seconds())
+                remain  = max(0, monitor.mobile_seconds_remaining - elapsed)
+                rm = remain // 60; rs = remain % 60
+                self._elapsed_lbl.configure(
+                    text=f"{rm:02d}:{rs:02d}",
+                    text_color=TEAL)
+                if hasattr(self, "_lunch_sub"):
+                    self._lunch_sub.configure(text="on mobile")
+
             elif monitor.clocked_in and self._elapsed_start_ts:
                 # ── Shift elapsed (fix 1) ──────────────────────────────────────
                 self._lunch_start_ts = None   # reset when not on lunch
+                self._mobile_start_ts = None  # reset when not on mobile
                 now     = datetime.now(timezone.utc)
                 elapsed = max(0, int((now - self._elapsed_start_ts).total_seconds()))
                 h = elapsed // 3600
@@ -609,6 +651,58 @@ class MonitorGUI:
     # ─────────────────────────────────────────────────────────────────────────
     # CLOCK ACTIONS
     # ─────────────────────────────────────────────────────────────────────────
+    def _mobile_toggle(self):
+        """Toggle mobile work mode: show picker when off, end it when on."""
+        if monitor.is_on_mobile:
+            def _end():
+                monitor.mobile_work_action('end')
+            threading.Thread(target=_end, daemon=True).start()
+        else:
+            self._show_mobile_picker()
+
+    def _show_mobile_picker(self):
+        """Modal dialog — pick 15m / 30m / 1h then optional notes."""
+        import customtkinter as ctk2
+        dlg = ctk2.CTkToplevel(self.root)
+        dlg.title("Mobile Work Mode")
+        dlg.geometry("310x260")
+        dlg.resizable(False, False)
+        dlg.configure(fg_color=BG_CARD)
+        dlg.grab_set()
+
+        ctk2.CTkLabel(dlg, text="📱  Working on mobile?",
+                      font=self._font(14, "bold"),
+                      text_color=TEAL).pack(pady=(18, 2))
+        ctk2.CTkLabel(dlg, text="Idle detection pauses while you're away.",
+                      font=self._font(10), text_color=TEXT_MUTED).pack(pady=(0, 10))
+
+        notes_var = ctk2.StringVar()
+        ctk2.CTkEntry(dlg, textvariable=notes_var, placeholder_text="Notes (optional)",
+                      width=270, height=30, font=self._font(11)).pack(pady=(0, 12))
+
+        btn_row = ctk2.CTkFrame(dlg, fg_color="transparent")
+        btn_row.pack(fill="x", padx=16)
+        for mins, lbl in [(15, "15 min"), (30, "30 min"), (60, "1 hour")]:
+            def _start(m=mins, d=dlg):
+                notes = notes_var.get().strip()
+                d.destroy()
+                def _do():
+                    res = monitor.mobile_work_action('start', duration_minutes=m, notes=notes)
+                    if res.get('success') and self._mobile_start_ts is None:
+                        self._mobile_start_ts = datetime.now(timezone.utc)
+                threading.Thread(target=_do, daemon=True).start()
+            ctk2.CTkButton(btn_row, text=lbl,
+                           fg_color=TEAL, hover_color=TEAL_DIM,
+                           font=self._font(11, "bold"), text_color=TEXT,
+                           height=36, corner_radius=8,
+                           command=_start).pack(side="left", fill="x", expand=True, padx=3)
+
+        ctk2.CTkButton(dlg, text="Cancel",
+                       fg_color="transparent", border_width=1, border_color=BORDER,
+                       font=self._font(10), text_color=TEXT_MUTED,
+                       height=28, corner_radius=8,
+                       command=dlg.destroy).pack(pady=(10, 0), padx=20, fill="x")
+
     def _clock(self, action):
         """Called from clock buttons — sends action to hub in a background thread."""
         btns = [self._btn_clock_in, self._btn_lunch_out,
