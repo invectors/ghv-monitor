@@ -377,6 +377,7 @@ class ScreenshotMonitor:
         # Mobile work state
         self.is_on_mobile            = False
         self.mobile_seconds_remaining = 0
+        self.mobile_last_sync_ts     = None  # UTC datetime of last server poll
 
         self.upload_queue       = []
         self.last_capture_success = None
@@ -678,6 +679,9 @@ class ScreenshotMonitor:
             self.mobile_seconds_remaining = int(secs) if secs is not None else 0
             if not self.is_on_mobile:
                 self.mobile_seconds_remaining = 0
+            # Anchor the countdown to now so the GUI counts down from this
+            # fresh server value rather than from the original start time.
+            self.mobile_last_sync_ts = datetime.now(timezone.utc)
             if self.on_status_changed:
                 self.on_status_changed()
             return data
@@ -817,6 +821,27 @@ class ScreenshotMonitor:
                 if self.is_monitoring:
                     print("[Sync] Stopping monitoring (server confirmed clocked out)")
                     self.stop_monitoring()
+
+            # ── Poll mobile work status ────────────────────────────────────
+            # Runs every 30-second sync so the app detects sessions started in
+            # the hub browser and catches server-side expiry without needing a
+            # separate scheduled job.
+            try:
+                _mr = requests.post(
+                    CONFIG['MOBILE_WORK_URL'],
+                    json={'action': 'status'},
+                    headers=self._auth_headers(),
+                    timeout=(5, 10))
+                _md = _mr.json()
+                self.is_on_mobile = bool(_md.get('active', False))
+                _secs = (_md.get('data') or {}).get('seconds_remaining')
+                self.mobile_seconds_remaining = int(_secs) if _secs is not None else 0
+                if not self.is_on_mobile:
+                    self.mobile_seconds_remaining = 0
+                # Fresh anchor so GUI counts down from this server-confirmed value
+                self.mobile_last_sync_ts = datetime.now(timezone.utc)
+            except Exception as _me:
+                print(f"[Mobile] Sync poll error: {_me}")
 
             if self.on_status_changed:
                 self.on_status_changed()
