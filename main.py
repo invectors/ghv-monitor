@@ -671,8 +671,15 @@ class ScreenshotMonitor:
                 headers=self._auth_headers(),
                 timeout=(10, 30)
             )
-            data = resp.json()
-            print(f"[Mobile] {action} → {resp.status_code} {data}")
+            print(f"[Mobile] {action} → HTTP {resp.status_code}")
+            if not resp.text.strip():
+                print("[Mobile] Empty response — FTP mobile_work.php with Bearer auth to the server")
+                return {'success': False, 'message': 'Server returned empty response.'}
+            try:
+                data = resp.json()
+            except Exception:
+                print(f"[Mobile] Non-JSON response (HTTP {resp.status_code}): {resp.text[:200]}")
+                return {'success': False, 'message': f'Bad response HTTP {resp.status_code}'}
             # Update local state
             self.is_on_mobile = bool(data.get('active', False))
             secs = (data.get('data') or {}).get('seconds_remaining')
@@ -832,14 +839,15 @@ class ScreenshotMonitor:
                     json={'action': 'status'},
                     headers=self._auth_headers(),
                     timeout=(5, 10))
-                _md = _mr.json()
-                self.is_on_mobile = bool(_md.get('active', False))
-                _secs = (_md.get('data') or {}).get('seconds_remaining')
-                self.mobile_seconds_remaining = int(_secs) if _secs is not None else 0
-                if not self.is_on_mobile:
-                    self.mobile_seconds_remaining = 0
-                # Fresh anchor so GUI counts down from this server-confirmed value
-                self.mobile_last_sync_ts = datetime.now(timezone.utc)
+                if _mr.text.strip():
+                    _md = _mr.json()
+                    self.is_on_mobile = bool(_md.get('active', False))
+                    _secs = (_md.get('data') or {}).get('seconds_remaining')
+                    self.mobile_seconds_remaining = int(_secs) if _secs is not None else 0
+                    if not self.is_on_mobile:
+                        self.mobile_seconds_remaining = 0
+                    self.mobile_last_sync_ts = datetime.now(timezone.utc)
+                # If response is empty, mobile_work.php Bearer auth not deployed yet — skip silently.
             except Exception as _me:
                 print(f"[Mobile] Sync poll error: {_me}")
 
