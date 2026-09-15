@@ -38,14 +38,14 @@ class MonitorGUI:
     def __init__(self):
         self.root = ctk.CTk()
         self.root.title("GHV Monitor")
-        self.root.geometry("380x680")
+        self.root.geometry("380x720")
         self.root.resizable(False, False)
         self.root.configure(fg_color=BG)
 
         self.root.update_idletasks()
         x = (self.root.winfo_screenwidth()  - 380) // 2
         y = (self.root.winfo_screenheight() - 680) // 2
-        self.root.geometry(f"380x680+{x}+{y}")
+        self.root.geometry(f"380x720+{x}+{y}")
 
         # All callbacks marshal to main thread via root.after
         monitor.on_status_changed      = lambda: self.root.after(0, self.update_status)
@@ -226,7 +226,7 @@ class MonitorGUI:
     # ─────────────────────────────────────────────────────────────────────────
     def _show_status(self):
         self._clear()
-        self.root.geometry("380x680")
+        self.root.geometry("380x720")
 
         # ── Header ────────────────────────────────────────────────────────
         hdr = ctk.CTkFrame(self.root, height=56, fg_color=BG_CARD, corner_radius=0)
@@ -274,7 +274,7 @@ class MonitorGUI:
         info_card = ctk.CTkFrame(self.root, fg_color=BG_CARD, corner_radius=14)
         info_card.pack(fill="x", padx=16, pady=(8, 0))
         info_row = ctk.CTkFrame(info_card, fg_color="transparent")
-        info_row.pack(fill="x", padx=14, pady=(8, 8))
+        info_row.pack(fill="x", padx=14, pady=(5, 5))
 
         # Left: elapsed
         el_col = ctk.CTkFrame(info_row, fg_color="transparent")
@@ -662,25 +662,25 @@ class MonitorGUI:
 
     def _show_mobile_picker(self):
         """Modal dialog — pick 15m / 30m / 1h then optional notes."""
-        import customtkinter as ctk2
-        dlg = ctk2.CTkToplevel(self.root)
+        # Use module-level ctk — re-importing inside a method causes blank
+        # dialogs on Linux because CTkToplevel rendering gets stuck.
+        dlg = ctk.CTkToplevel(self.root)
         dlg.title("Mobile Work Mode")
         dlg.geometry("310x260")
         dlg.resizable(False, False)
         dlg.configure(fg_color=BG_CARD)
-        dlg.grab_set()
 
-        ctk2.CTkLabel(dlg, text="📱  Working on mobile?",
+        ctk.CTkLabel(dlg, text="📱  Working on mobile?",
                       font=self._font(14, "bold"),
                       text_color=TEAL).pack(pady=(18, 2))
-        ctk2.CTkLabel(dlg, text="Idle detection pauses while you're away.",
+        ctk.CTkLabel(dlg, text="Idle detection pauses while you're away.",
                       font=self._font(10), text_color=TEXT_MUTED).pack(pady=(0, 10))
 
-        notes_var = ctk2.StringVar()
-        ctk2.CTkEntry(dlg, textvariable=notes_var, placeholder_text="Notes (optional)",
+        notes_var = ctk.StringVar()
+        ctk.CTkEntry(dlg, textvariable=notes_var, placeholder_text="Notes (optional)",
                       width=270, height=30, font=self._font(11)).pack(pady=(0, 12))
 
-        btn_row = ctk2.CTkFrame(dlg, fg_color="transparent")
+        btn_row = ctk.CTkFrame(dlg, fg_color="transparent")
         btn_row.pack(fill="x", padx=16)
         for mins, lbl in [(15, "15 min"), (30, "30 min"), (60, "1 hour")]:
             def _start(m=mins, d=dlg):
@@ -691,17 +691,22 @@ class MonitorGUI:
                     if res.get('success') and self._mobile_start_ts is None:
                         self._mobile_start_ts = datetime.now(timezone.utc)
                 threading.Thread(target=_do, daemon=True).start()
-            ctk2.CTkButton(btn_row, text=lbl,
+            ctk.CTkButton(btn_row, text=lbl,
                            fg_color=TEAL, hover_color=TEAL_DIM,
                            font=self._font(11, "bold"), text_color=TEXT,
                            height=36, corner_radius=8,
                            command=_start).pack(side="left", fill="x", expand=True, padx=3)
 
-        ctk2.CTkButton(dlg, text="Cancel",
+        ctk.CTkButton(dlg, text="Cancel",
                        fg_color="transparent", border_width=1, border_color=BORDER,
                        font=self._font(10), text_color=TEXT_MUTED,
                        height=28, corner_radius=8,
                        command=dlg.destroy).pack(pady=(10, 0), padx=20, fill="x")
+
+        # grab_set AFTER all widgets are rendered — calling it earlier blocks
+        # the Tk event loop before widgets draw, causing a blank window on Linux
+        dlg.update_idletasks()
+        dlg.grab_set()
 
     def _clock(self, action):
         """Called from clock buttons — sends action to hub in a background thread."""
