@@ -427,6 +427,12 @@ class MonitorGUI:
                     self._status_sub.configure(text="Monitoring paused. Resumes when you return.")
                     self._badge.configure(text="  PAUSED  ",
                                           fg_color="#2d2600", text_color=YELLOW)
+                elif monitor.is_on_mobile:
+                    self._draw_ring(TEAL)
+                    self._status_title.configure(text="Working on Mobile")
+                    # Subtitle is updated every second by _tick_elapsed with countdown
+                    self._badge.configure(text="  MOBILE  ",
+                                          fg_color="#061a1a", text_color=TEAL)
                 elif monitor.is_idle:
                     self._draw_ring(YELLOW)
                     self._status_title.configure(text="Idle Detected")
@@ -593,15 +599,24 @@ class MonitorGUI:
 
             elif monitor.is_on_mobile:
                 # ── Mobile work countdown ──────────────────────────────────────
-                if self._mobile_start_ts is None:
-                    self._mobile_start_ts = datetime.now(timezone.utc)
-                now     = datetime.now(timezone.utc)
-                elapsed = int((now - self._mobile_start_ts).total_seconds())
-                remain  = max(0, monitor.mobile_seconds_remaining - elapsed)
+                # Anchor to when we last got a fresh seconds_remaining from server
+                # (set by mobile_work_action and by sync_with_tracker every 30s).
+                # This prevents drift: old _mobile_start_ts kept subtracting elapsed
+                # from a stale baseline each time sync updated mobile_seconds_remaining.
+                last_sync = getattr(monitor, 'mobile_last_sync_ts', None)
+                if last_sync is None:
+                    last_sync = datetime.now(timezone.utc)
+                now    = datetime.now(timezone.utc)
+                since  = int((now - last_sync).total_seconds())
+                remain = max(0, monitor.mobile_seconds_remaining - since)
                 rm = remain // 60; rs = remain % 60
                 self._elapsed_lbl.configure(
-                    text=f"{rm:02d}:{rs:02d}",
-                    text_color=TEAL)
+                    text=f"{rm:02d}:{rs:02d}", text_color=TEAL)
+                # Update status subtitle with live countdown
+                if hasattr(self, "_status_sub"):
+                    self._status_sub.configure(
+                        text=(f"Back in {rm}m {rs:02d}s" if remain > 0
+                              else "Time's up — tap I'm Back"))
                 if hasattr(self, "_lunch_sub"):
                     self._lunch_sub.configure(text="on mobile")
 
@@ -666,7 +681,7 @@ class MonitorGUI:
         # dialogs on Linux because CTkToplevel rendering gets stuck.
         dlg = ctk.CTkToplevel(self.root)
         dlg.title("Mobile Work Mode")
-        dlg.geometry("310x260")
+        dlg.geometry("360x270")
         dlg.resizable(False, False)
         dlg.configure(fg_color=BG_CARD)
 
