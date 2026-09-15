@@ -681,7 +681,7 @@ class MonitorGUI:
         # dialogs on Linux because CTkToplevel rendering gets stuck.
         dlg = ctk.CTkToplevel(self.root)
         dlg.title("Mobile Work Mode")
-        dlg.geometry("360x270")
+        dlg.geometry("320x330")
         dlg.resizable(False, False)
         dlg.configure(fg_color=BG_CARD)
 
@@ -695,8 +695,6 @@ class MonitorGUI:
         ctk.CTkEntry(dlg, textvariable=notes_var, placeholder_text="Notes (optional)",
                       width=270, height=30, font=self._font(11)).pack(pady=(0, 12))
 
-        btn_row = ctk.CTkFrame(dlg, fg_color="transparent")
-        btn_row.pack(fill="x", padx=16)
         for mins, lbl in [(15, "15 min"), (30, "30 min"), (60, "1 hour")]:
             def _start(m=mins, d=dlg):
                 notes = notes_var.get().strip()
@@ -706,11 +704,11 @@ class MonitorGUI:
                     if res.get('success') and self._mobile_start_ts is None:
                         self._mobile_start_ts = datetime.now(timezone.utc)
                 threading.Thread(target=_do, daemon=True).start()
-            ctk.CTkButton(btn_row, text=lbl,
+            ctk.CTkButton(dlg, text=lbl,
                            fg_color=TEAL, hover_color=TEAL_DIM,
                            font=self._font(11, "bold"), text_color=TEXT,
                            height=36, corner_radius=8,
-                           command=_start).pack(side="left", fill="x", expand=True, padx=3)
+                           command=_start).pack(fill="x", padx=16, pady=(0, 6))
 
         ctk.CTkButton(dlg, text="Cancel",
                        fg_color="transparent", border_width=1, border_color=BORDER,
