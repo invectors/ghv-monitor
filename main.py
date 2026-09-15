@@ -69,6 +69,7 @@ CONFIG = {
     'IDLE_URL':     'https://hub.gohirevirtual.net/api/screenshots/idle.php',
     'CLOCK_URL':    'https://hub.gohirevirtual.net/api/screenshots/clock.php',
     'ACTIVITY_URL': 'https://hub.gohirevirtual.net/api/screenshots/activity.php',
+    'MOBILE_WORK_URL': 'https://hub.gohirevirtual.net/ajax/mobile_work.php',
     'CAPTURE_INTERVAL_MINUTES':      10,
     'STATUS_CHECK_SECONDS':          30,
     'IDLE_CHECK_INTERVAL_SECONDS':   15,
@@ -97,6 +98,9 @@ class ActivityTracker:
         self._session_start = None
         self._lock          = threading.Lock()
         self._pending       = []
+        # Tracks when we last left each (app, title) pair so rapid bounces
+        # (alt-tab for <30s then back) get merged, not logged twice.
+        self._recent_end    = {}   # {(app_name, window_title): datetime}
 
     # ── Platform-specific window detection ────────────────────────────────
     def _active_window(self):
@@ -182,14 +186,38 @@ class ActivityTracker:
             if app_name != self._current_app or title != self._current_title:
                 if self._current_app and self._session_start:
                     duration = int((now - self._session_start).total_seconds())
-                    if duration >= 5:
-                        self._pending.append({
-                            'app_name':         self._current_app,
-                            'window_title':     self._current_title or '',
-                            'started_at':       self._session_start.strftime('%Y-%m-%d %H:%M:%S'),
-                            'ended_at':         now.strftime('%Y-%m-%d %H:%M:%S'),
-                            'duration_seconds': duration,
-                        })
+                    key_out  = (self._current_app, self._current_title or '')
+
+                    if duration >= 30:  # Skip sub-30s bounces (raised from 5s)
+                        # Merge if user returns to same app+title within 90s.
+                        # Collapses rapid back-and-forth (e.g. alt-tab loops).
+                        last_end = self._recent_end.get(key_out)
+                        merged   = False
+                        if last_end and (now - last_end).total_seconds() < 90:
+                            for e in reversed(self._pending):
+                                if (e['app_name']     == key_out[0] and
+                                        e['window_title'] == key_out[1]):
+                                    e['ended_at']         = now.strftime('%Y-%m-%d %H:%M:%S')
+                                    e['duration_seconds'] += duration
+                                    merged = True
+                                    break
+                        if not merged:
+                            self._pending.append({
+                                'app_name':         self._current_app,
+                                'window_title':     self._current_title or '',
+                                'started_at':       self._session_start.strftime('%Y-%m-%d %H:%M:%S'),
+                                'ended_at':         now.strftime('%Y-%m-%d %H:%M:%S'),
+                                'duration_seconds': duration,
+                            })
+
+                    # Always update last-left time (even sub-30s) for next return merge
+                    self._recent_end[key_out] = now
+
+                    # Prune keys older than 5 min to cap memory
+                    cutoff = now - timedelta(seconds=300)
+                    self._recent_end = {k: v for k, v in self._recent_end.items()
+                                        if v > cutoff}
+
                 self._current_app   = app_name
                 self._current_title = title
                 self._session_start = now
@@ -345,6 +373,10 @@ class ScreenshotMonitor:
         self.lunch_limit_seconds     = 3600   # default 1 hr until first sync
         self.lunch_remaining_seconds = 3600
         self.lunch_exhausted         = False
+
+        # Mobile work state
+        self.is_on_mobile            = False
+        self.mobile_seconds_remaining = 0
 
         self.upload_queue       = []
         self.last_capture_success = None
@@ -618,6 +650,41 @@ class ScreenshotMonitor:
             return False
 
     # ── Activity flush (NEW) ─────────────────────────────────────────────
+    def mobile_work_action(self, action, duration_minutes=None, notes=''):
+        """
+        Call /ajax/mobile_work.php (Bearer-auth variant).
+        action: 'start' | 'end' | 'status'
+        Returns server JSON dict. Updates is_on_mobile / mobile_seconds_remaining.
+        """
+        if not self.credentials:
+            return {'success': False, 'message': 'Not logged in'}
+        try:
+            payload = {'action': action}
+            if duration_minutes is not None:
+                payload['duration_minutes'] = int(duration_minutes)
+            if notes:
+                payload['notes'] = notes
+            resp = requests.post(
+                CONFIG['MOBILE_WORK_URL'],
+                json=payload,
+                headers=self._auth_headers(),
+                timeout=(10, 30)
+            )
+            data = resp.json()
+            print(f"[Mobile] {action} → {resp.status_code} {data}")
+            # Update local state
+            self.is_on_mobile = bool(data.get('active', False))
+            secs = (data.get('data') or {}).get('seconds_remaining')
+            self.mobile_seconds_remaining = int(secs) if secs is not None else 0
+            if not self.is_on_mobile:
+                self.mobile_seconds_remaining = 0
+            if self.on_status_changed:
+                self.on_status_changed()
+            return data
+        except Exception as e:
+            print(f"[Mobile] Error: {e}")
+            return {'success': False, 'message': str(e)}
+
     def flush_activity(self):
         """Send buffered activity logs to the server."""
         if not self.credentials:
@@ -781,8 +848,8 @@ class ScreenshotMonitor:
 
     def check_idle(self):
         try:
-            if not self.is_monitoring or self.is_paused:
-                return  # Don't flag idle during lunch breaks
+            if not self.is_monitoring or self.is_paused or self.is_on_mobile:
+                return  # Don't flag idle during lunch breaks or mobile work
             idle_now = self.idle_detector.seconds_idle()
             threshold = CONFIG['IDLE_DETECTION_THRESHOLD_SECONDS']
             ceiling   = CONFIG['IDLE_SANITY_CEILING_SECONDS']
