@@ -189,11 +189,11 @@ class ActivityTracker:
                     key_out  = (self._current_app, self._current_title or '')
 
                     if duration >= 30:  # Skip sub-30s bounces (raised from 5s)
-                        # Merge if user returns to same app+title within 90s.
+                        # Merge if user returns to same app+title within 5 min.
                         # Collapses rapid back-and-forth (e.g. alt-tab loops).
                         last_end = self._recent_end.get(key_out)
                         merged   = False
-                        if last_end and (now - last_end).total_seconds() < 90:
+                        if last_end and (now - last_end).total_seconds() < 300:  # 5-min window (was 90s)
                             for e in reversed(self._pending):
                                 if (e['app_name']     == key_out[0] and
                                         e['window_title'] == key_out[1]):
