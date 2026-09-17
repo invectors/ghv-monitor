@@ -79,7 +79,6 @@ a = Analysis(
         'win32con',
         'win32api',
         'pywintypes',
-        'psutil',
     ],
     hookspath=[],
     hooksconfig={},
