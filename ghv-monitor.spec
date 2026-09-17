@@ -49,6 +49,14 @@ try:
 except Exception:
     version_info = None
 
+import sys as _sys
+
+# psutil is used by the Linux/Windows activity tracking branch of _active_window().
+# PyInstaller finds it via static analysis even on macOS (where it's never called),
+# and then tries to lipo it into a universal2 fat binary — which fails because the
+# macOS pip wheel is ARM64-only. Excluding it on macOS is safe: macOS uses AppKit.
+_excludes = ['psutil'] if _sys.platform == 'darwin' else []
+
 a = Analysis(
     ['app.py'],
     pathex=[],
@@ -73,7 +81,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=_excludes,
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,
