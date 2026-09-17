@@ -4,12 +4,6 @@ requests==2.31.0
 schedule==1.2.1
 pynput==1.7.6
 customtkinter==5.2.2
-# Linux: X11 idle time via XScreenSaver — bundled by PyInstaller so VAs
-# don't need to install anything. Works on Cinnamon, GNOME, KDE, XFCE.
-python-xlib==0.33 ; sys_platform == 'linux'
-# macOS-only: native thread-safe idle detection via Quartz
+# macOS-only: native thread-safe idle detection via Quartz (replaces pynput
+# listeners on macOS, which crash when run off the main thread).
 pyobjc-framework-Quartz==10.3.1 ; sys_platform == 'darwin'
-# Windows: active window detection for activity tracking
-pywin32 ; sys_platform == 'win32'
-# All platforms: process name lookup for activity tracking
-psutil
