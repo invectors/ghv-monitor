@@ -4,8 +4,10 @@ requests==2.31.0
 schedule==1.2.1
 pynput==1.7.6
 customtkinter==5.2.2
-# macOS-only: native thread-safe idle detection via Quartz (replaces pynput
-# listeners on macOS, which crash when run off the main thread).
+# macOS-only: native thread-safe idle detection via Quartz
 pyobjc-framework-Quartz==10.3.1 ; sys_platform == 'darwin'
 # Windows-only: active window detection for activity tracking
 pywin32 ; sys_platform == 'win32'
+# Process name lookup for activity tracking (Windows + Linux)
+# Excluded from macOS bundle via spec _excludes — macOS uses AppKit instead
+psutil
