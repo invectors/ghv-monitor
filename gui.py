@@ -382,6 +382,13 @@ class MonitorGUI:
                      font=self._font(9, "bold"), text_color=TEXT_MUTED).pack()
         ctk.CTkLabel(foot, text="GoHireVirtual Monitoring System",
                      font=self._font(8), text_color="#333333").pack(pady=(1, 0))
+        ctk.CTkButton(foot, text="🎫  Having issues? Create a ticket",
+                      fg_color="transparent", hover_color="#1a1a1a",
+                      font=self._font(9), text_color=TEXT_MUTED,
+                      height=22, cursor="hand2",
+                      command=lambda: __import__('webbrowser').open(
+                          'https://support.gohirevirtual.net')
+                      ).pack(pady=(3, 0))
 
         self._elapsed_start_ts = None
         self._lunch_start_ts   = None
@@ -565,29 +572,28 @@ class MonitorGUI:
                 return
 
             if monitor.on_lunch:
-                # ── Lunch elapsed counter ──────────────────────────────────────
-                if self._lunch_start_ts is None:
-                    # Set to now. live_rem counts down from server's
-                    # lunch_remaining_seconds. Using back-calculation caused
-                    # double-subtraction: lunch_remaining already has
-                    # lunch_used subtracted; subtracting lunch_secs (which
-                    # started at already_used) subtracted it a second time.
-                    self._lunch_start_ts = datetime.now(timezone.utc)
+                # ── Lunch elapsed + remaining ──────────────────────────────────
+                # Use lunch_last_sync_ts as anchor (same fix as mobile).
+                # _lunch_start_ts caused double-subtraction: server already has
+                # elapsed subtracted from lunch_remaining_seconds, then we
+                # subtracted elapsed_since_detection again → showed 6m not 33m.
+                last_sync = getattr(monitor, 'lunch_last_sync_ts', None)
+                if last_sync is None:
+                    last_sync = datetime.now(timezone.utc)
+                now   = datetime.now(timezone.utc)
+                since = int((now - last_sync).total_seconds())
 
-                now     = datetime.now(timezone.utc)
-                elapsed = int((now - self._lunch_start_ts).total_seconds())
-
-                # Show total lunch duration = what server knew + elapsed here
-                total_lunch = getattr(monitor, 'lunch_used_seconds', 0) + elapsed
+                # Elapsed display: total time on lunch = server knew + since last sync
+                total_lunch = getattr(monitor, 'lunch_used_seconds', 0) + since
                 lh = total_lunch // 3600
                 lm = (total_lunch % 3600) // 60
                 ls = total_lunch % 60
                 self._elapsed_lbl.configure(
                     text=f"{lh:02d}:{lm:02d}:{ls:02d}", text_color=YELLOW)
 
-                # Live lunch remaining — count down from last server value
+                # Remaining: count down from server value, not from app-start
                 if hasattr(self, "_lunch_lbl"):
-                    live_rem = max(0, monitor.lunch_remaining_seconds - elapsed)
+                    live_rem = max(0, monitor.lunch_remaining_seconds - since)
                     rm  = live_rem // 60
                     rs  = live_rem % 60
                     disp  = f"{rm}m {rs}s" if rs else f"{rm}m"
