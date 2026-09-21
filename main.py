@@ -373,6 +373,7 @@ class ScreenshotMonitor:
         self.lunch_limit_seconds     = 3600   # default 1 hr until first sync
         self.lunch_remaining_seconds = 3600
         self.lunch_exhausted         = False
+        self.lunch_last_sync_ts      = None   # anchor for GUI countdown (same pattern as mobile)
 
         # Mobile work state
         self.is_on_mobile            = False
@@ -793,6 +794,9 @@ class ScreenshotMonitor:
             self.lunch_limit_seconds = int(status.get('lunch_limit_seconds', 3600))
             self.lunch_remaining_seconds = int(status.get('lunch_remaining_seconds', 3600))
             self.lunch_exhausted     = bool(status.get('lunch_exhausted', False))
+            # Reset anchor so GUI counts down from this fresh server value,
+            # not from when lunch was first detected — same fix as mobile.
+            self.lunch_last_sync_ts  = datetime.now(timezone.utc)
             self.server_capture_disabled = (status.get('reason') == 'disabled')
 
             # Store session info for elapsed timer
