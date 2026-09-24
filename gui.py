@@ -38,14 +38,14 @@ class MonitorGUI:
     def __init__(self):
         self.root = ctk.CTk()
         self.root.title("GHV Monitor")
-        self.root.geometry("380x720")
+        self.root.geometry("380x760")
         self.root.resizable(False, False)
         self.root.configure(fg_color=BG)
 
         self.root.update_idletasks()
         x = (self.root.winfo_screenwidth()  - 380) // 2
         y = (self.root.winfo_screenheight() - 680) // 2
-        self.root.geometry(f"380x720+{x}+{y}")
+        self.root.geometry(f"380x760+{x}+{y}")
 
         # All callbacks marshal to main thread via root.after
         monitor.on_status_changed      = lambda: self.root.after(0, self.update_status)
@@ -226,7 +226,7 @@ class MonitorGUI:
     # ─────────────────────────────────────────────────────────────────────────
     def _show_status(self):
         self._clear()
-        self.root.geometry("380x720")
+        self.root.geometry("380x760")
 
         # ── Header ────────────────────────────────────────────────────────
         hdr = ctk.CTkFrame(self.root, height=56, fg_color=BG_CARD, corner_radius=0)
@@ -278,7 +278,7 @@ class MonitorGUI:
 
         # Left: elapsed
         el_col = ctk.CTkFrame(info_row, fg_color="transparent")
-        el_col.pack(side="left", fill="both", expand=True)
+        el_col.pack(side="left", fill="x", expand=True)
         ctk.CTkLabel(el_col, text="⏱  ELAPSED", font=self._font(9, "bold"),
                      text_color=TEXT_MUTED).pack(anchor="w")
         self._elapsed_lbl = ctk.CTkLabel(el_col, text="--:--:--",
@@ -294,7 +294,7 @@ class MonitorGUI:
                                                                fill="y", padx=12)
         # Right: lunch remaining
         lunch_col = ctk.CTkFrame(info_row, fg_color="transparent")
-        lunch_col.pack(side="left", fill="both", expand=True)
+        lunch_col.pack(side="left", fill="x", expand=True)
         ctk.CTkLabel(lunch_col, text="🍴  LUNCH LEFT", font=self._font(9, "bold"),
                      text_color=TEXT_MUTED).pack(anchor="w")
         self._lunch_lbl = ctk.CTkLabel(lunch_col, text="--",
